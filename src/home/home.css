@@ -912,12 +912,15 @@
   min-height: 0;
   overflow: hidden;
   font-size: 11px;
+  box-sizing: border-box;
 }
 
-/* The animated scene owns the middle space and centers its content
- * vertically; head/stats/history are fixed and never overflow. */
+/* The animated scene owns the leftover space and centers its content
+ * vertically; head/stats/history are fixed rows that never move or
+ * overflow. flex-basis: 0 — the scene shrinks to zero before the fixed
+ * rows are ever pushed out. */
 .home-agent-scene {
-  flex: 1 1 auto;
+  flex: 1 1 0;
   min-height: 0;
   display: flex;
   align-items: center;
@@ -1684,9 +1687,12 @@
 /* Compact scene (widget body) */
 .home-agent-scene .home-scene {
   display: flex;
+  min-height: 0;
+  overflow: hidden;
 }
 .home-agent-scene .home-scene-item {
   min-width: 0;
+  min-height: 0;
   flex: 1;
 }
 .home-agent-scene .home-scene-msg {
