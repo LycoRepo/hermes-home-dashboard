@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { argPreview, type AgentLiveState } from "./agentLive";
+import { MarkdownText } from "./MarkdownText";
 
 /** One "scene" of the live agent feed — the thing happening right now. */
 export interface SceneItem {
@@ -24,6 +25,22 @@ export function useScene(live: AgentLiveState): SceneItem {
     const prevStreaming = wasStreaming.current;
     wasStreaming.current = streaming;
 
+    // A running tool outranks streamed text — the user wants to SEE the
+    // tool and its content while it executes, not just the commentary.
+    if (live.currentTool) {
+      const key = `tool-${live.currentTool.name}-${live.currentTool.startedAt}`;
+      const body = argPreview(live.currentTool.args, 800) ?? "";
+      setScene((s) =>
+        s.key === key ? { ...s, body } : {
+          key, kind: "tool" as const,
+          title: live.currentTool!.name,
+          body,
+          meta: "running",
+        },
+      );
+      return;
+    }
+
     if (streaming && !prevStreaming) {
       setScene({
         key: `msg-${Date.now()}`,
@@ -35,17 +52,6 @@ export function useScene(live: AgentLiveState): SceneItem {
       });
     } else if (streaming) {
       setScene((s) => (s.streaming ? { ...s, body: live.streamText } : s));
-    } else if (live.currentTool) {
-      const key = `tool-${live.currentTool.name}-${live.currentTool.startedAt}`;
-      const body = argPreview(live.currentTool.args, 500) ?? "";
-      setScene((s) =>
-        s.key === key ? { ...s, body } : {
-          key, kind: "tool" as const,
-          title: live.currentTool!.name,
-          body,
-          meta: "running",
-        },
-      );
     } else if (live.lastMessage) {
       const msg = live.lastMessage;
       setScene((s) =>
@@ -99,7 +105,7 @@ function SceneBody({ scene }: { scene: SceneItem }) {
   if (scene.kind === "message") {
     return (
       <div className="home-scene-msg">
-        {scene.body}
+        <MarkdownText text={scene.body} />
         {scene.streaming && <span className="home-scene-caret" aria-hidden="true" />}
       </div>
     );

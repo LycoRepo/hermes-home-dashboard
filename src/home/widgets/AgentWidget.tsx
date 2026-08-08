@@ -2,10 +2,10 @@ import { enterTheater } from "../theater";
 import type { HomeData } from "../useHomeData";
 import { useAgentLive } from "./agent/agentLive";
 import { LiveScene, useScene } from "./agent/LiveScene";
+import { HoverCtl } from "./HoverArrows";
 
 interface Props {
   data: HomeData;
-  editing: boolean;
 }
 
 function fmtCost(n: number | undefined): string {
@@ -24,7 +24,7 @@ function fmtTok(n: number | undefined): string {
 
 /** The agent eye — compact live view with the animated scene and the
  *  take-control button. No emoji: pure type + CSS. */
-export function AgentWidget({ data, editing }: Props) {
+export function AgentWidget({ data }: Props) {
   const live = useAgentLive();
   const scene = useScene(live);
   const totals = data.analytics?.totals;
@@ -38,22 +38,25 @@ export function AgentWidget({ data, editing }: Props) {
       <div className="home-agent-head">
         <span className={`home-agent-dot ${live.busy ? "busy" : ""}`} aria-hidden="true" />
         <span className="home-agent-status">{statusLabel}</span>
-        {!editing && (
-          <button
-            className="home-agent-take"
-            onClick={() => enterTheater()}
-            title="Take control of the screen — live agent theater"
-            aria-label="Take control"
-          >
-            <span className="home-agent-take-ico" aria-hidden="true" />
-            take control
-          </button>
-        )}
       </div>
 
       <div className="home-agent-scene">
         <LiveScene scene={scene} />
       </div>
+
+      {/* Same philosophy as the other widgets: floating control in the top
+          right, faded in on hover, fully hidden in edit mode. */}
+      <HoverCtl className="home-agent-ctl">
+        <button
+          className="home-agent-take"
+          onClick={() => enterTheater()}
+          title="Take control of the screen — live agent theater"
+          aria-label="Take control"
+        >
+          <span className="home-agent-take-ico" aria-hidden="true" />
+          take control
+        </button>
+      </HoverCtl>
 
       <div className="home-agent-stats">
         <span title="Input tokens today">

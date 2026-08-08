@@ -189,7 +189,7 @@ export const WIDGET_REGISTRY: Record<string, WidgetDef> = {
   },
   agent: {
     title: "agent",
-    component: ({ data, editing }) => <AgentWidget data={data} editing={editing} />,
+    component: ({ data }) => <AgentWidget data={data} />,
     defaultSize: { gw: 4, gh: 3 }, minSize: { gw: 3, gh: 2 },
     navigateTo: null, dataSource: null,
   },
