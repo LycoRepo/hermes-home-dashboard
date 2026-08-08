@@ -38,7 +38,12 @@ export async function installDesktopPlugin({
     }
 
     const stamp = new Date().toISOString().replaceAll(":", "-").replaceAll(".", "-");
-    backup = `${destination}.backup-${stamp}`;
+    // Backups live OUTSIDE desktop-plugins/ — the desktop app scans that
+    // directory for plugin folders and a stale backup (same plugin id) can
+    // win the scan over the live link, silently serving the old plugin.
+    const backupRoot = path.join(hermesHome, "backups", "desktop-plugins");
+    await mkdir(backupRoot, { recursive: true });
+    backup = path.join(backupRoot, `${PLUGIN_ID}.backup-${stamp}`);
     await rename(destination, backup);
   } catch (error) {
     if (error?.code !== "ENOENT") throw error;
