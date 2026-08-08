@@ -16,6 +16,7 @@ import { LifeWidget } from "./LifeWidget";
 import { PomodoroWidget } from "./PomodoroWidget";
 import { CountdownWidget } from "./CountdownWidget";
 import { CalendarWidget } from "./CalendarWidget";
+import { AgentWidget } from "./AgentWidget";
 
 export interface WidgetRenderProps {
   data: HomeData;
@@ -184,6 +185,12 @@ export const WIDGET_REGISTRY: Record<string, WidgetDef> = {
     title: "calendar",
     component: ({ gridSize }) => <CalendarWidget gridSize={gridSize} />,
     defaultSize: { gw: 3, gh: 4 }, minSize: { gw: 2, gh: 3 },
+    navigateTo: null, dataSource: null,
+  },
+  agent: {
+    title: "agent",
+    component: ({ data, editing }) => <AgentWidget data={data} editing={editing} />,
+    defaultSize: { gw: 4, gh: 3 }, minSize: { gw: 3, gh: 2 },
     navigateTo: null, dataSource: null,
   },
 };

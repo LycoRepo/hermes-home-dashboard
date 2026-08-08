@@ -30,6 +30,13 @@ declare module "@hermes/plugin-sdk" {
     register(ctx: PluginContext): void;
   }
 
+  export interface RpcEvent<T = unknown> {
+    type: string;
+    payload?: T;
+    session_id?: string;
+    profile?: string;
+  }
+
   export const host: {
     status(): Promise<unknown>;
     logs(params: {
@@ -39,5 +46,7 @@ declare module "@hermes/plugin-sdk" {
       component?: string;
     }): Promise<unknown>;
     navigate(path: string): void;
+    /** Subscribe to live gateway events by type ('*' = everything). Returns a disposer. */
+    onEvent(type: string, listener: (event: RpcEvent) => void): () => void;
   };
 }

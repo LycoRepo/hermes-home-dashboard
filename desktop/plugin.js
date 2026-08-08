@@ -31,6 +31,11 @@ function fetchJSON(url, init) {
 function navigateTo(routePath) {
   getHost().navigateTo(routePath);
 }
+function onGatewayEvent(type, listener) {
+  const h = getHost();
+  if (!h.onEvent) return null;
+  return h.onEvent(type, listener);
+}
 const GRID_COLS = 12;
 function collide(a, b) {
   return a.gx < b.gx + b.gw && a.gx + a.gw > b.gx && a.gy < b.gy + b.gh && a.gy + a.gh > b.gy;
@@ -1628,6 +1633,358 @@ function CalendarWidget({ gridSize }) {
     ] })
   ] });
 }
+let active = false;
+const listeners$1 = /* @__PURE__ */ new Set();
+function enterTheater() {
+  if (active) return;
+  active = true;
+  listeners$1.forEach((l) => l(true));
+}
+function exitTheater() {
+  if (!active) return;
+  active = false;
+  listeners$1.forEach((l) => l(false));
+}
+function subscribeTheater(listener) {
+  listeners$1.add(listener);
+  return () => listeners$1.delete(listener);
+}
+const EMPTY_LIVE = {
+  live: false,
+  busy: false,
+  currentTool: null,
+  toolHistory: [],
+  streamText: "",
+  lastMessage: null,
+  feed: [],
+  subagents: [],
+  activeSessionId: null,
+  activeTitle: null,
+  lastEventAt: null
+};
+const MAX_TOOL_HISTORY = 12;
+const MAX_FEED = 80;
+let liveState = EMPTY_LIVE;
+const listeners = /* @__PURE__ */ new Set();
+let subscribed = false;
+let feedSeq = 0;
+function setLive(fn) {
+  const next = fn(liveState);
+  if (next === liveState) return;
+  liveState = next;
+  listeners.forEach((l) => l());
+}
+function pushFeed(entry) {
+  setLive((s) => {
+    const e = { ...entry, id: ++feedSeq };
+    const feed = [e, ...s.feed];
+    return { ...s, feed: feed.length > MAX_FEED ? feed.slice(0, MAX_FEED) : feed };
+  });
+}
+function str(v) {
+  return typeof v === "string" && v.length > 0 ? v : void 0;
+}
+function asObj(v) {
+  return typeof v === "object" && v !== null ? v : void 0;
+}
+function pick(p, ...keys) {
+  if (!p) return void 0;
+  for (const k of keys) {
+    const v = str(p[k]);
+    if (v) return v;
+  }
+  return void 0;
+}
+function argPreview(args, max = 160) {
+  if (args === void 0 || args === null) return void 0;
+  let s;
+  if (typeof args === "string") s = args;
+  else {
+    try {
+      s = JSON.stringify(args);
+    } catch {
+      s = String(args);
+    }
+  }
+  if (s.length <= max) return s;
+  return `${s.slice(0, max)}…`;
+}
+function handleEvent(event) {
+  const { type, payload } = event;
+  const p = asObj(payload);
+  const now = Date.now();
+  const bump = (s) => ({ ...s, lastEventAt: now });
+  if (type === "tool.generating") {
+    const name = pick(p, "name") ?? "tool";
+    setLive((s) => bump({
+      ...s,
+      busy: true,
+      currentTool: { name, startedAt: now, status: "running" }
+    }));
+    pushFeed({ at: now, kind: "tool", label: name, detail: "generating…" });
+    return;
+  }
+  if (type === "tool.start" || type === "tool.progress") {
+    const name = pick(p, "name", "tool_name") ?? "tool";
+    setLive((s) => bump({
+      ...s,
+      busy: true,
+      currentTool: { name, args: p?.args ?? p, startedAt: now, status: "running" }
+    }));
+    pushFeed({
+      at: now,
+      kind: "tool",
+      label: name,
+      detail: type === "tool.progress" ? "progress…" : argPreview(p?.args)
+    });
+    return;
+  }
+  if (type === "tool.complete") {
+    const name = pick(p, "name", "tool_name") ?? "";
+    const ok = p?.ok !== false && !str(p?.error);
+    const duration = typeof p?.duration === "number" ? p.duration : void 0;
+    setLive((s) => bump({
+      ...s,
+      currentTool: null,
+      busy: s.subagents.some((a) => a.status === "running") || s.streamText.length > 0,
+      toolHistory: [{
+        name: name || s.currentTool?.name || "tool",
+        args: p?.args ?? s.currentTool?.args,
+        startedAt: s.currentTool?.startedAt ?? now,
+        status: ok ? "complete" : "failed",
+        duration
+      }, ...s.toolHistory].slice(0, MAX_TOOL_HISTORY)
+    }));
+    pushFeed({
+      at: now,
+      kind: "tool",
+      label: name || "tool",
+      ok,
+      detail: duration !== void 0 ? `${duration.toFixed(1)}s` : void 0
+    });
+    return;
+  }
+  if (type === "message.start") {
+    setLive((s) => bump({ ...s, busy: true, streamText: "" }));
+    return;
+  }
+  if (type === "message.delta") {
+    const text = pick(p, "text", "delta", "content");
+    if (!text) return;
+    setLive((s) => bump({
+      ...s,
+      busy: true,
+      streamText: (s.streamText + text).slice(-6e3)
+    }));
+    return;
+  }
+  if (type === "message.interim") {
+    const text = pick(p, "text", "content");
+    if (!text) return;
+    setLive((s) => bump({ ...s, lastMessage: text }));
+    return;
+  }
+  if (type === "message.complete") {
+    setLive((s) => {
+      const done = s.streamText.trim();
+      return bump({
+        ...s,
+        streamText: "",
+        lastMessage: done.length > 0 ? done : s.lastMessage,
+        busy: s.currentTool !== null || s.subagents.some((a) => a.status === "running")
+      });
+    });
+    return;
+  }
+  if (type === "subagent.start" || type === "subagent.progress") {
+    const name = pick(p, "name", "role", "id") ?? "subagent";
+    setLive((s) => bump({
+      ...s,
+      busy: true,
+      subagents: [
+        { name, status: "running", goal: pick(p, "goal", "task") },
+        ...s.subagents.filter((a) => a.name !== name)
+      ].slice(0, 6)
+    }));
+    pushFeed({ at: now, kind: "subagent", label: name, detail: "spawned" });
+    return;
+  }
+  if (type === "subagent.complete") {
+    const name = pick(p, "name", "role", "id");
+    if (!name) return;
+    setLive((s) => bump({
+      ...s,
+      subagents: s.subagents.map((a) => a.name === name ? { ...a, status: "done" } : a)
+    }));
+    pushFeed({ at: now, kind: "subagent", label: name, ok: true, detail: "done" });
+    return;
+  }
+  if (type === "subagent.thinking") {
+    const name = pick(p, "name", "role", "id") ?? "subagent";
+    pushFeed({ at: now, kind: "subagent", label: name, detail: "thinking…" });
+    setLive(bump);
+    return;
+  }
+  if (type === "session.new" || type === "session.info") {
+    const sid = pick(p, "session_id", "id") ?? event.session_id;
+    if (!sid) return;
+    setLive((s) => bump({
+      ...s,
+      activeSessionId: sid,
+      activeTitle: pick(p, "title") ?? s.activeTitle
+    }));
+    pushFeed({ at: now, kind: "session", label: "session", detail: "new" });
+    return;
+  }
+  if (type === "session.title") {
+    const title = pick(p, "title");
+    if (!title) return;
+    setLive((s) => bump({ ...s, activeTitle: title }));
+    return;
+  }
+  if (type === "session.status") {
+    const sid = pick(p, "session_id", "id") ?? event.session_id;
+    const status = pick(p, "status");
+    if (status === "stopped" || status === "idle") {
+      setLive((s) => s.busy ? bump({ ...s, busy: false }) : s);
+    }
+    if (sid) setLive((s) => bump({ ...s, activeSessionId: sid }));
+    return;
+  }
+  if (type === "error") {
+    pushFeed({
+      at: now,
+      kind: "system",
+      label: "error",
+      detail: pick(p, "error", "message")
+    });
+    setLive(bump);
+    return;
+  }
+  if (type.startsWith("tool.") || type.startsWith("message.") || type.startsWith("subagent.") || type.startsWith("session.") || type.startsWith("thinking.") || type.startsWith("reasoning.") || type.startsWith("approval.") || type.startsWith("run.")) {
+    pushFeed({ at: now, kind: "system", label: type });
+    setLive(bump);
+  }
+}
+function ensureSubscribed() {
+  if (subscribed) return;
+  subscribed = true;
+  const all = onGatewayEvent("*", handleEvent);
+  if (all) {
+    setLive((s) => s.live ? s : { ...s, live: true });
+    pushFeed({ at: Date.now(), kind: "system", label: "live", detail: "gateway channel open" });
+  }
+}
+function useAgentLive() {
+  const [state, setState] = useState(liveState);
+  useEffect(() => {
+    ensureSubscribed();
+    setState(liveState);
+    listeners.add(onChange);
+    return () => {
+      listeners.delete(onChange);
+    };
+  }, []);
+  function onChange() {
+    setState(liveState);
+  }
+  return state;
+}
+function fmtCost$1(n) {
+  if (n === void 0 || !Number.isFinite(n)) return "—";
+  if (n < 0.01) return `$${(n * 1e3).toFixed(2)}m`;
+  if (n < 1) return `$${n.toFixed(3)}`;
+  return `$${n.toFixed(2)}`;
+}
+function fmtTok$1(n) {
+  if (n === void 0 || !Number.isFinite(n)) return "—";
+  if (n >= 1e6) return `${(n / 1e6).toFixed(1)}M`;
+  if (n >= 1e3) return `${(n / 1e3).toFixed(1)}k`;
+  return String(n);
+}
+function truncate(s, max) {
+  return s.length <= max ? s : `${s.slice(0, max)}…`;
+}
+function AgentWidget({ data, editing }) {
+  const live = useAgentLive();
+  const analytics = data.analytics;
+  const totals = analytics?.totals;
+  const statusLabel = live.busy ? live.currentTool ? "working" : "thinking" : "idle";
+  return /* @__PURE__ */ jsxs("div", { className: "home-agent", children: [
+    /* @__PURE__ */ jsxs("div", { className: "home-agent-head", children: [
+      /* @__PURE__ */ jsx("span", { className: `home-agent-dot ${live.busy ? "busy" : ""}`, "aria-hidden": "true" }),
+      /* @__PURE__ */ jsx("span", { className: "home-agent-status", children: statusLabel }),
+      live.currentTool && /* @__PURE__ */ jsxs("span", { className: "home-agent-tool", children: [
+        "⚡",
+        live.currentTool.name
+      ] }),
+      !editing && /* @__PURE__ */ jsx(
+        "button",
+        {
+          className: "home-agent-take",
+          onClick: () => enterTheater(),
+          title: "Take control of the screen — live agent theater",
+          "aria-label": "Take control",
+          children: "🎬 take control"
+        }
+      )
+    ] }),
+    live.currentTool && /* @__PURE__ */ jsxs("div", { className: "home-agent-line home-agent-toolbox", children: [
+      /* @__PURE__ */ jsx("span", { className: "home-agent-k", children: live.currentTool.name }),
+      /* @__PURE__ */ jsx("span", { className: "home-agent-dim", children: truncate(
+        (() => {
+          if (live.currentTool.args === void 0) return "…";
+          if (typeof live.currentTool.args === "string") return live.currentTool.args;
+          try {
+            return JSON.stringify(live.currentTool.args);
+          } catch {
+            return "…";
+          }
+        })(),
+        180
+      ) })
+    ] }),
+    (live.streamText || live.lastMessage) && /* @__PURE__ */ jsx("div", { className: "home-agent-line home-agent-msg", children: truncate(live.streamText || live.lastMessage || "", 240) }),
+    live.subagents.length > 0 && /* @__PURE__ */ jsxs("div", { className: "home-agent-line home-agent-dim", children: [
+      "⛏ ",
+      live.subagents.filter((a) => a.status === "running").length,
+      " subagent(s) working"
+    ] }),
+    /* @__PURE__ */ jsxs("div", { className: "home-agent-stats", children: [
+      /* @__PURE__ */ jsxs("span", { title: "Input tokens today", children: [
+        "▲",
+        fmtTok$1(totals?.total_input),
+        " ",
+        /* @__PURE__ */ jsx("i", { children: "in" })
+      ] }),
+      /* @__PURE__ */ jsxs("span", { title: "Output tokens today", children: [
+        "▼",
+        fmtTok$1(totals?.total_output),
+        " ",
+        /* @__PURE__ */ jsx("i", { children: "out" })
+      ] }),
+      /* @__PURE__ */ jsxs("span", { title: "Estimated cost today", children: [
+        fmtCost$1(totals?.total_estimated_cost),
+        " ",
+        /* @__PURE__ */ jsx("i", { children: "est" })
+      ] }),
+      /* @__PURE__ */ jsxs("span", { title: "Sessions today", children: [
+        totals?.total_sessions ?? "—",
+        " ",
+        /* @__PURE__ */ jsx("i", { children: "ses" })
+      ] })
+    ] }),
+    live.toolHistory.length > 0 && /* @__PURE__ */ jsx("div", { className: "home-agent-history", children: live.toolHistory.slice(0, 4).map((t, i) => /* @__PURE__ */ jsxs("span", { className: "home-agent-hist", children: [
+      /* @__PURE__ */ jsx("span", { className: t.status === "complete" ? "ok" : "bad", children: t.status === "complete" ? "✓" : "✗" }),
+      t.name,
+      t.duration !== void 0 && /* @__PURE__ */ jsxs("i", { children: [
+        t.duration.toFixed(0),
+        "s"
+      ] })
+    ] }, `${t.name}-${t.startedAt}-${i}`)) }),
+    !live.live && /* @__PURE__ */ jsx("div", { className: "home-agent-dim", children: "polling mode · no live channel" })
+  ] });
+}
 const WIDGET_REGISTRY = {
   ascii: {
     title: "hermes",
@@ -1789,6 +2146,14 @@ const WIDGET_REGISTRY = {
     component: ({ gridSize }) => /* @__PURE__ */ jsx(CalendarWidget, { gridSize }),
     defaultSize: { gw: 3, gh: 4 },
     minSize: { gw: 2, gh: 3 },
+    navigateTo: null,
+    dataSource: null
+  },
+  agent: {
+    title: "agent",
+    component: ({ data, editing }) => /* @__PURE__ */ jsx(AgentWidget, { data, editing }),
+    defaultSize: { gw: 4, gh: 3 },
+    minSize: { gw: 3, gh: 2 },
     navigateTo: null,
     dataSource: null
   }
@@ -2184,6 +2549,379 @@ function useHomeData() {
   }, []);
   return data;
 }
+function buildRecommendations(data, live) {
+  const out = [];
+  const totals = data.analytics?.totals;
+  if (data.errors.size > 0) {
+    out.push({
+      severity: "crit",
+      title: `${data.errors.size} data source(s) failing`,
+      detail: `Polling errors on: ${[...data.errors].join(", ")}. Check the gateway and plugin API.`
+    });
+  }
+  const errorLogs = data.logs?.lines?.length ?? 0;
+  if (errorLogs > 0) {
+    out.push({
+      severity: errorLogs > 10 ? "crit" : "warn",
+      title: `${errorLogs} error line(s) in the gateway log`,
+      detail: "Tail the log to see if a platform or plugin is throwing repeatedly."
+    });
+  }
+  const est = totals?.total_estimated_cost ?? 0;
+  if (est > 0.5) {
+    out.push({
+      severity: est > 2 ? "crit" : "warn",
+      title: `≈$${est.toFixed(2)} estimated today`,
+      detail: est > 2 ? "Cost is climbing. Consider a cheaper model, context compression, or capping long sessions." : "Spend is moderate — keep an eye on it if you're mid-migration."
+    });
+  }
+  const totalTok = (totals?.total_input ?? 0) + (totals?.total_output ?? 0);
+  if (totalTok > 2e6) {
+    out.push({
+      severity: "warn",
+      title: `${(totalTok / 1e6).toFixed(1)}M tokens today`,
+      detail: "Heavy usage. /compact long sessions and reuse cached context to cut input tokens."
+    });
+  }
+  const repeated = mostRepeatedTool(live.toolHistory);
+  if (repeated && repeated.count >= 5) {
+    out.push({
+      severity: "info",
+      title: `"${repeated.name}" called ${repeated.count}× recently`,
+      detail: "A repeated tool sequence is a skill in disguise — consider saving it with skill_manage."
+    });
+  }
+  const activeSessions = (data.sessions?.sessions ?? []).filter((s) => s.is_active).length;
+  if (activeSessions >= 3) {
+    out.push({
+      severity: "info",
+      title: `${activeSessions} sessions active at once`,
+      detail: "Parallel work is running — delegate_task fans out well, but watch for tool conflicts on shared files."
+    });
+  }
+  if (live.subagents.some((a) => a.status === "running")) {
+    out.push({
+      severity: "info",
+      title: `${live.subagents.filter((a) => a.status === "running").length} subagent(s) working`,
+      detail: "Orchestration in flight. Check back for their consolidated reports."
+    });
+  }
+  const slow = live.currentTool && Date.now() - live.currentTool.startedAt > 12e4 ? live.currentTool : null;
+  if (slow) {
+    out.push({
+      severity: "warn",
+      title: `"${slow.name}" running >2min`,
+      detail: "Long tool call — it may be a build, a big search, or a hung process. Watch it."
+    });
+  }
+  const active2 = (data.sessions?.sessions ?? []).find((s) => s.is_active);
+  if (active2) {
+    if ((active2.message_count ?? 0) > 80) {
+      out.push({
+        severity: "warn",
+        title: `Active session at ${active2.message_count} messages`,
+        detail: "Long context costs more per turn and degrades focus. A fresh session or /compact resets the cache."
+      });
+    }
+    if ((active2.tool_call_count ?? 0) > 40) {
+      out.push({
+        severity: "info",
+        title: `${active2.tool_call_count} tool calls in the active session`,
+        detail: "High tool churn — the task may benefit from a dedicated skill or a subagent."
+      });
+    }
+  }
+  const topSkill = data.analytics?.skills?.top_skills?.[0];
+  if (topSkill && topSkill.total_count > 0 && topSkill.percentage < 5) {
+    out.push({
+      severity: "info",
+      title: `Top skill "${topSkill.skill}" only ${topSkill.percentage}% of loads`,
+      detail: "Your most-used skill is still under-leveraged — consider bundling related skills."
+    });
+  }
+  if (out.length === 0) {
+    out.push({
+      severity: "info",
+      title: "All quiet on the home front",
+      detail: "No anomalies right now. The coach stays silent until there's something worth saying."
+    });
+  }
+  return out;
+}
+function mostRepeatedTool(history) {
+  const counts = /* @__PURE__ */ new Map();
+  for (const t of history) {
+    counts.set(t.name, (counts.get(t.name) ?? 0) + 1);
+  }
+  let best = null;
+  for (const [name, count] of counts) {
+    if (!best || count > best.count) best = { name, count };
+  }
+  return best && best.count >= 2 ? best : null;
+}
+function fmtCost(n) {
+  if (n === void 0 || !Number.isFinite(n)) return "—";
+  if (n < 0.01) return `$${(n * 1e3).toFixed(2)}m`;
+  if (n < 1) return `$${n.toFixed(3)}`;
+  return `$${n.toFixed(2)}`;
+}
+function fmtTok(n) {
+  if (n === void 0 || !Number.isFinite(n)) return "—";
+  if (n >= 1e6) return `${(n / 1e6).toFixed(1)}M`;
+  if (n >= 1e3) return `${(n / 1e3).toFixed(1)}k`;
+  return String(n);
+}
+function timeAgo(at) {
+  const s = Math.max(0, Math.round((Date.now() - at) / 1e3));
+  if (s < 5) return "now";
+  if (s < 60) return `${s}s ago`;
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m}m ago`;
+  return `${Math.round(m / 60)}h ago`;
+}
+function hhmm(at) {
+  const d = new Date(at);
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}:${String(d.getSeconds()).padStart(2, "0")}`;
+}
+function extractPaths(tools) {
+  const paths = /* @__PURE__ */ new Set();
+  for (const t of tools) {
+    const args = t.args;
+    if (!args || typeof args !== "object") continue;
+    const a = args;
+    for (const key of ["path", "file", "output_path", "workdir", "cwd", "target"]) {
+      const v = a[key];
+      if (typeof v === "string" && v.length > 1) paths.add(v);
+    }
+    if (typeof a.command === "string") {
+      const m = a.command.match(/["']([^"']+\.[a-zA-Z0-9_]+)["']/g);
+      if (m) m.forEach((s) => paths.add(s.slice(1, -1)));
+    }
+  }
+  return [...paths].slice(0, 8);
+}
+function fileGlyph(path) {
+  const ext = path.split(".").pop()?.toLowerCase() ?? "";
+  if (ext === "ts" || ext === "tsx") return "τ";
+  if (ext === "js" || ext === "jsx" || ext === "mjs") return "JS";
+  if (ext === "py") return "py";
+  if (ext === "md") return "MD";
+  if (ext === "json") return "{}";
+  if (ext === "yaml" || ext === "yml") return "Y";
+  if (ext === "css" || ext === "html") return "#";
+  if (["png", "jpg", "webp", "gif", "svg"].includes(ext)) return "▣";
+  return "·";
+}
+function PanelTitle({ children }) {
+  return /* @__PURE__ */ jsx("b", { className: "home-theater-panel-title", children });
+}
+function NowPanel({ data, live }) {
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 1e3);
+    return () => clearInterval(t);
+  }, []);
+  const status = live.busy ? live.currentTool ? "working" : "thinking" : data.status?.gateway_running ? "idle" : "gateway down";
+  return /* @__PURE__ */ jsxs("section", { className: "home-theater-panel home-theater-now", children: [
+    /* @__PURE__ */ jsxs(PanelTitle, { children: [
+      /* @__PURE__ */ jsx("span", { className: `home-agent-dot ${live.busy ? "busy" : ""}`, "aria-hidden": "true" }),
+      "NOW · ",
+      status.toUpperCase(),
+      live.activeTitle && /* @__PURE__ */ jsxs("span", { className: "home-theater-sub", children: [
+        "— ",
+        live.activeTitle
+      ] })
+    ] }),
+    live.currentTool && /* @__PURE__ */ jsxs("div", { className: "home-theater-current-tool", children: [
+      /* @__PURE__ */ jsxs("span", { className: "home-theater-ct-name", children: [
+        "⚡ ",
+        live.currentTool.name
+      ] }),
+      /* @__PURE__ */ jsx("span", { className: "home-theater-ct-args", children: argPreview(live.currentTool.args, 400) ?? "…" })
+    ] }),
+    live.streamText && /* @__PURE__ */ jsx("div", { className: "home-theater-stream", children: live.streamText }),
+    /* @__PURE__ */ jsxs("div", { className: "home-theater-feed", children: [
+      live.feed.length === 0 && /* @__PURE__ */ jsx("div", { className: "home-theater-dim", children: "no live activity yet — the feed fills as the agent works" }),
+      live.feed.slice(0, 40).map((e) => /* @__PURE__ */ jsxs("div", { className: "home-theater-feed-row", children: [
+        /* @__PURE__ */ jsx("span", { className: "home-theater-feed-time", children: hhmm(e.at) }),
+        /* @__PURE__ */ jsx("span", { className: `home-theater-feed-kind ${e.kind}${e.ok === false ? " bad" : ""}`, children: e.ok === false ? "✗" : e.kind === "tool" ? "⚡" : e.kind === "message" ? "▸" : e.kind === "subagent" ? "⛏" : "·" }),
+        /* @__PURE__ */ jsx("span", { className: "home-theater-feed-label", children: e.label }),
+        e.detail && /* @__PURE__ */ jsx("span", { className: "home-theater-feed-detail", children: e.detail })
+      ] }, e.id))
+    ] }),
+    /* @__PURE__ */ jsxs("div", { className: "home-theater-foot", children: [
+      /* @__PURE__ */ jsxs("span", { children: [
+        "last event ",
+        live.lastEventAt ? timeAgo(live.lastEventAt) : "—"
+      ] }),
+      /* @__PURE__ */ jsx("span", { children: live.live ? "live" : "polling" }),
+      /* @__PURE__ */ jsx("span", { children: now ? timeAgo(now) : "" })
+    ] })
+  ] });
+}
+function ToolPanel({ live }) {
+  return /* @__PURE__ */ jsxs("section", { className: "home-theater-panel", children: [
+    /* @__PURE__ */ jsx(PanelTitle, { children: "FUNCTION" }),
+    live.currentTool ? /* @__PURE__ */ jsxs("div", { className: "home-theater-fn-current", children: [
+      /* @__PURE__ */ jsxs("div", { className: "home-theater-fn-name", children: [
+        /* @__PURE__ */ jsx("span", { className: "home-theater-fn-spin", "aria-hidden": "true", children: "⏳" }),
+        live.currentTool.name,
+        /* @__PURE__ */ jsx("span", { className: "home-theater-fn-state running", children: "running" })
+      ] }),
+      /* @__PURE__ */ jsx("pre", { className: "home-theater-fn-args", children: argPreview(live.currentTool.args, 600) ?? "awaiting args…" })
+    ] }) : /* @__PURE__ */ jsx("div", { className: "home-theater-dim", children: "no tool running" }),
+    live.toolHistory.length > 0 && /* @__PURE__ */ jsx("div", { className: "home-theater-fn-history", children: live.toolHistory.slice(0, 8).map((t, i) => /* @__PURE__ */ jsxs("div", { className: "home-theater-fn-row", children: [
+      /* @__PURE__ */ jsx("span", { className: t.status === "complete" ? "ok" : "bad", children: t.status === "complete" ? "✓" : "✗" }),
+      /* @__PURE__ */ jsx("span", { className: "home-theater-fn-hname", children: t.name }),
+      /* @__PURE__ */ jsx("span", { className: "home-theater-fn-hargs", children: argPreview(t.args, 90) }),
+      t.duration !== void 0 && /* @__PURE__ */ jsxs("span", { className: "home-theater-fn-hdur", children: [
+        t.duration.toFixed(1),
+        "s"
+      ] })
+    ] }, `${t.name}-${t.startedAt}-${i}`)) })
+  ] });
+}
+function TokenPanel({ data }) {
+  const totals = data.analytics?.totals;
+  const byModel = data.analytics?.by_model ?? [];
+  const active2 = (data.sessions?.sessions ?? []).find((s) => s.is_active);
+  return /* @__PURE__ */ jsxs("section", { className: "home-theater-panel", children: [
+    /* @__PURE__ */ jsx(PanelTitle, { children: "TOKENS & COST" }),
+    /* @__PURE__ */ jsxs("div", { className: "home-theater-tok-grid", children: [
+      /* @__PURE__ */ jsxs("div", { className: "home-theater-tok-cell", children: [
+        /* @__PURE__ */ jsxs("span", { className: "home-theater-tok-num", children: [
+          "▲ ",
+          fmtTok(totals?.total_input)
+        ] }),
+        /* @__PURE__ */ jsx("span", { className: "home-theater-tok-lbl", children: "input today" })
+      ] }),
+      /* @__PURE__ */ jsxs("div", { className: "home-theater-tok-cell", children: [
+        /* @__PURE__ */ jsxs("span", { className: "home-theater-tok-num", children: [
+          "▼ ",
+          fmtTok(totals?.total_output)
+        ] }),
+        /* @__PURE__ */ jsx("span", { className: "home-theater-tok-lbl", children: "output today" })
+      ] }),
+      /* @__PURE__ */ jsxs("div", { className: "home-theater-tok-cell", children: [
+        /* @__PURE__ */ jsxs("span", { className: "home-theater-tok-num", children: [
+          "⧉ ",
+          fmtTok(totals?.total_cache_read)
+        ] }),
+        /* @__PURE__ */ jsx("span", { className: "home-theater-tok-lbl", children: "cache read" })
+      ] }),
+      /* @__PURE__ */ jsxs("div", { className: "home-theater-tok-cell", children: [
+        /* @__PURE__ */ jsx("span", { className: "home-theater-tok-num home-theater-money", children: fmtCost(totals?.total_estimated_cost) }),
+        /* @__PURE__ */ jsx("span", { className: "home-theater-tok-lbl", children: "est. cost today" })
+      ] })
+    ] }),
+    byModel.length > 0 && /* @__PURE__ */ jsx("div", { className: "home-theater-tok-models", children: byModel.slice(0, 4).map((m) => /* @__PURE__ */ jsxs("div", { className: "home-theater-tok-model", children: [
+      /* @__PURE__ */ jsx("span", { className: "home-theater-tok-mname", children: m.model }),
+      /* @__PURE__ */ jsxs("span", { className: "home-theater-tok-mtok", children: [
+        fmtTok(m.input_tokens + m.output_tokens),
+        " tok"
+      ] }),
+      /* @__PURE__ */ jsx("span", { className: "home-theater-tok-mcost", children: fmtCost(m.estimated_cost) })
+    ] }, m.model)) }),
+    active2 && /* @__PURE__ */ jsxs("div", { className: "home-theater-tok-session", children: [
+      /* @__PURE__ */ jsx("span", { className: "home-theater-tok-slbl", children: "active session" }),
+      /* @__PURE__ */ jsx("span", { children: active2.title ?? active2.id }),
+      /* @__PURE__ */ jsxs("span", { className: "home-theater-tok-snum", children: [
+        fmtTok((active2.input_tokens ?? 0) + (active2.output_tokens ?? 0)),
+        " tok ·",
+        " ",
+        active2.message_count ?? 0,
+        " msg · ",
+        active2.tool_call_count ?? 0,
+        " tools"
+      ] })
+    ] })
+  ] });
+}
+function ProjectPanel({ data, live }) {
+  const active2 = (data.sessions?.sessions ?? []).find((s) => s.is_active);
+  const paths = useMemo(
+    () => extractPaths([...live.currentTool ? [live.currentTool] : [], ...live.toolHistory]),
+    [live.currentTool, live.toolHistory]
+  );
+  return /* @__PURE__ */ jsxs("section", { className: "home-theater-panel", children: [
+    /* @__PURE__ */ jsx(PanelTitle, { children: "PROJECT" }),
+    active2 ? /* @__PURE__ */ jsxs("div", { className: "home-theater-proj-session", children: [
+      /* @__PURE__ */ jsx("div", { className: "home-theater-proj-title", children: active2.title ?? "(untitled session)" }),
+      /* @__PURE__ */ jsxs("div", { className: "home-theater-proj-meta", children: [
+        active2.model ?? "—",
+        " · ",
+        active2.source ?? "—",
+        " · started ",
+        timeAgo(active2.started_at * 1e3)
+      ] })
+    ] }) : /* @__PURE__ */ jsx("div", { className: "home-theater-dim", children: "no active session" }),
+    paths.length > 0 ? /* @__PURE__ */ jsx("div", { className: "home-theater-proj-files", children: paths.map((p) => /* @__PURE__ */ jsxs("div", { className: "home-theater-proj-file", children: [
+      /* @__PURE__ */ jsx("span", { className: "home-theater-proj-glyph", children: fileGlyph(p) }),
+      /* @__PURE__ */ jsx("span", { className: "home-theater-proj-path", children: p })
+    ] }, p)) }) : /* @__PURE__ */ jsx("div", { className: "home-theater-dim", children: "files touched by the agent will appear here as it works" }),
+    live.subagents.length > 0 && /* @__PURE__ */ jsx("div", { className: "home-theater-proj-subagents", children: live.subagents.map((a) => /* @__PURE__ */ jsxs("div", { className: "home-theater-proj-subagent", children: [
+      /* @__PURE__ */ jsx("span", { className: a.status === "running" ? "ok" : "dim", children: a.status === "running" ? "⛏" : "✓" }),
+      a.name,
+      a.goal && /* @__PURE__ */ jsxs("span", { className: "home-theater-proj-subgoal", children: [
+        "— ",
+        a.goal
+      ] })
+    ] }, a.name)) })
+  ] });
+}
+function CoachPanel({ data, live }) {
+  const recs = useMemo(
+    () => buildRecommendations(data, live),
+    [data, live]
+  );
+  return /* @__PURE__ */ jsxs("section", { className: "home-theater-panel", children: [
+    /* @__PURE__ */ jsx(PanelTitle, { children: "RECOMMENDATIONS" }),
+    /* @__PURE__ */ jsx("div", { className: "home-theater-rec-list", children: recs.map((r, i) => /* @__PURE__ */ jsxs("div", { className: `home-theater-rec ${r.severity}`, children: [
+      /* @__PURE__ */ jsx("span", { className: "home-theater-rec-tag", children: r.severity === "crit" ? "!!" : r.severity === "warn" ? "!" : "i" }),
+      /* @__PURE__ */ jsxs("div", { className: "home-theater-rec-body", children: [
+        /* @__PURE__ */ jsx("div", { className: "home-theater-rec-title", children: r.title }),
+        /* @__PURE__ */ jsx("div", { className: "home-theater-rec-detail", children: r.detail })
+      ] })
+    ] }, i)) })
+  ] });
+}
+function AgentTheater({ data }) {
+  const live = useAgentLive();
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.key === "Escape") exitTheater();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+  return /* @__PURE__ */ jsxs("div", { className: "home-theater", role: "dialog", "aria-label": "Agent theater", children: [
+    /* @__PURE__ */ jsxs("header", { className: "home-theater-head", children: [
+      /* @__PURE__ */ jsx("span", { className: `home-agent-dot ${live.busy ? "busy" : ""}`, "aria-hidden": "true" }),
+      /* @__PURE__ */ jsx("span", { className: "home-theater-title", children: "AGENT THEATER" }),
+      /* @__PURE__ */ jsxs("span", { className: "home-theater-sub", children: [
+        live.busy ? "the agent is working" : "the agent is idle",
+        " · ",
+        live.live ? "live feed" : "polling"
+      ] }),
+      /* @__PURE__ */ jsx(
+        "button",
+        {
+          className: "home-theater-release",
+          onClick: () => exitTheater(),
+          title: "Release control (Esc)",
+          children: "✕ release control"
+        }
+      )
+    ] }),
+    /* @__PURE__ */ jsxs("div", { className: "home-theater-grid", children: [
+      /* @__PURE__ */ jsx("div", { className: "home-theater-span-7", children: /* @__PURE__ */ jsx(NowPanel, { data, live }) }),
+      /* @__PURE__ */ jsx("div", { className: "home-theater-span-5", children: /* @__PURE__ */ jsx(ToolPanel, { live }) }),
+      /* @__PURE__ */ jsx("div", { className: "home-theater-span-5", children: /* @__PURE__ */ jsx(TokenPanel, { data }) }),
+      /* @__PURE__ */ jsx("div", { className: "home-theater-span-7", children: /* @__PURE__ */ jsx(ProjectPanel, { data, live }) }),
+      /* @__PURE__ */ jsx("div", { className: "home-theater-span-12", children: /* @__PURE__ */ jsx(CoachPanel, { data, live }) })
+    ] })
+  ] });
+}
 const LAYOUT_VERSION = 1;
 const DEFAULT_LAYOUT = {
   version: LAYOUT_VERSION,
@@ -2227,6 +2965,7 @@ function HomePage() {
   const [editing, setEditing] = useState(false);
   const [showEdit, setShowEdit] = useState(false);
   const [overTrash, setOverTrash] = useState(false);
+  const [theaterOn, setTheaterOn] = useState(false);
   const [toast, setToast] = useState(null);
   const rootRef = useRef(null);
   const catalogRef = useRef(null);
@@ -2234,6 +2973,10 @@ function HomePage() {
   const dirty = useRef(false);
   const toastTimer = useRef(null);
   const data = useHomeData();
+  useEffect(() => subscribeTheater(setTheaterOn), []);
+  useEffect(() => {
+    if (theaterOn && editing) setEditing(false);
+  }, [theaterOn, editing]);
   const showToast = useCallback((msg) => {
     setToast(msg);
     if (toastTimer.current) clearTimeout(toastTimer.current);
@@ -2364,12 +3107,13 @@ function HomePage() {
             }
           )
         ] }),
-        toast && /* @__PURE__ */ jsx("div", { className: "home-toast", role: "status", children: toast })
+        toast && /* @__PURE__ */ jsx("div", { className: "home-toast", role: "status", children: toast }),
+        theaterOn && /* @__PURE__ */ jsx(AgentTheater, { data })
       ]
     }
   );
 }
-const homeCss = "/* Home page — rice-style widget grid.\n * Every color routes through --home-accent (the active theme's primary),\n * so switching themes recolors the whole page with zero widget changes.\n * Swap teal (#2dd4bf) stays fixed: it is interaction semantics, not theme. */\n\n.home-root {\n  --home-accent: var(--color-primary, var(--ui-accent, #ffd700));\n  --home-accent-dim: color-mix(in srgb, var(--home-accent) 55%, #000);\n  --home-surface: color-mix(\n    in srgb,\n    var(--home-accent) 6%,\n    var(--ui-editor-surface-background, rgb(10 10 14 / 0.55))\n  );\n  --home-border: color-mix(in srgb, var(--home-accent) 18%, transparent);\n  --home-error: var(--color-destructive, #e25555);\n  position: relative;\n  height: 100%;\n  overflow: auto;\n  font-family: var(--theme-font-mono, ui-monospace, monospace);\n  color: var(--color-foreground, var(--ui-text-primary, #d8dce6));\n}\n\n.home-stage {\n  position: relative;\n  min-height: 60vh;\n  touch-action: none;\n}\n\n.home-widget {\n  position: absolute;\n  border-radius: 8px;\n  padding: 10px 12px;\n  background: var(--home-surface);\n  border: 1px solid var(--home-border);\n  backdrop-filter: blur(12px);\n  -webkit-backdrop-filter: blur(12px);\n  box-shadow: 0 10px 30px rgb(0 0 0 / 0.5);\n  overflow: hidden;\n  transition: left 0.18s ease, top 0.18s ease;\n  container-type: size;\n  font-size: 11px;\n  line-height: 1.5;\n  /* Promote each widget to its own compositor layer so the constantly\n   * repainting matrix canvas doesn't force the neighbours' backdrop-filter\n   * to recompose every frame — that recomposition is what produced the\n   * horizontal flicker sweeping across the glass panels. */\n  transform: translateZ(0);\n  contain: paint;\n}\n.home-root.editing .home-widget { user-select: none; }\n.home-widget.dragging {\n  transition: none;\n  opacity: 0.9;\n  border-color: var(--home-accent);\n  z-index: 50;\n  cursor: grabbing;\n}\n.home-widget.swap-target {\n  border-color: #2dd4bf;\n  box-shadow: 0 0 0 1px rgb(45 212 191 / 0.5), 0 10px 30px rgb(0 0 0 / 0.5);\n}\n/* Over the trash zone — about to be deleted. */\n.home-widget.trashing {\n  opacity: 0.45;\n  border-color: var(--home-error);\n  box-shadow: 0 0 0 1px color-mix(in srgb, var(--home-error) 60%, transparent),\n    0 10px 30px rgb(0 0 0 / 0.5);\n}\n\n/* Floating label that follows the pointer while dragging a new widget in. */\n.home-add-ghost {\n  position: fixed;\n  z-index: 70;\n  transform: translate(-50%, -140%);\n  padding: 4px 10px;\n  border-radius: 6px;\n  font-size: 11px;\n  white-space: nowrap;\n  pointer-events: none;\n  color: var(--home-accent);\n  background: var(--home-surface);\n  border: 1px solid var(--home-accent);\n  backdrop-filter: blur(12px);\n  -webkit-backdrop-filter: blur(12px);\n  box-shadow: 0 8px 24px rgb(0 0 0 / 0.45);\n}\n\n.home-widget .hd {\n  display: block;\n  font-size: 9px;\n  letter-spacing: 0.18em;\n  margin-bottom: 6px;\n  font-weight: 700;\n  text-transform: uppercase;\n  color: var(--home-accent-dim);\n  white-space: nowrap;\n  overflow: hidden;\n}\n.home-widget .hd::before { content: \"── \"; opacity: 0.5; }\n.home-widget .hd::after { content: \" ─────────────────────────────────\"; opacity: 0.3; }\n.home-root.editing .home-widget .hd { cursor: grab; }\n\n.home-widget .rs {\n  position: absolute;\n  right: 2px;\n  bottom: 2px;\n  width: 13px;\n  height: 13px;\n  cursor: nwse-resize;\n  border-right: 2px solid color-mix(in srgb, var(--home-accent) 45%, transparent);\n  border-bottom: 2px solid color-mix(in srgb, var(--home-accent) 45%, transparent);\n  border-radius: 2px;\n  z-index: 3;\n}\n.home-widget .wremove {\n  position: absolute;\n  top: 4px;\n  right: 6px;\n  z-index: 3;\n  background: none;\n  border: none;\n  color: var(--home-error);\n  font-size: 13px;\n  line-height: 1;\n  cursor: pointer;\n  padding: 2px 4px;\n}\n.home-widget .werr { color: var(--home-error); }\n\n/* ── hover controls (contextual chrome, rest mode only) ──\n * Reusable floating control rendered inside a widget body. Hidden by default,\n * fades in while hovering the widget, and fully suppressed in edit mode so it\n * never fights drag/resize. Widgets opt in by rendering <HoverCtl>/<HoverArrows>. */\n.hover-ctl {\n  position: absolute;\n  top: 4px;\n  right: 6px;\n  z-index: 4;\n  display: flex;\n  align-items: center;\n  gap: 4px;\n  opacity: 0;\n  pointer-events: none;\n  transition: opacity 0.18s ease;\n  /* Sits on the glass without a hard edge. */\n  padding: 1px 3px;\n  border-radius: 6px;\n  background: color-mix(in srgb, var(--home-surface) 80%, transparent);\n}\n.home-widget:hover .hover-ctl,\n.hover-ctl:focus-within { opacity: 1; pointer-events: auto; }\n.home-root.editing .hover-ctl { display: none; }\n@media (hover: none) {\n  /* Touch: no hover, so keep controls reachable but understated. */\n  .hover-ctl { opacity: 0.5; pointer-events: auto; }\n}\n\n.hv-arrow {\n  background: none;\n  border: none;\n  cursor: pointer;\n  padding: 0 3px;\n  color: var(--home-accent-dim);\n  font-size: 14px;\n  line-height: 1;\n  font-family: inherit;\n}\n.hv-arrow:hover:not(:disabled) { color: var(--home-accent); }\n.hv-arrow:disabled { opacity: 0.3; cursor: default; }\n.hv-label {\n  font-size: 9px;\n  letter-spacing: 0.1em;\n  text-transform: uppercase;\n  color: var(--home-accent-dim);\n  white-space: nowrap;\n}\n.hv-label-btn {\n  background: none;\n  border: none;\n  cursor: pointer;\n  font: inherit;\n  letter-spacing: 0.1em;\n  padding: 0;\n}\n.hv-label-btn:hover { color: var(--home-accent); }\n\n/* Toggle/option buttons inside a hover control (clock format, host view…). */\n.hv-opt {\n  background: none;\n  border: none;\n  cursor: pointer;\n  font: inherit;\n  font-size: 9px;\n  letter-spacing: 0.08em;\n  text-transform: uppercase;\n  color: var(--home-accent-dim);\n  padding: 0 4px;\n  border-radius: 4px;\n}\n.hv-opt:hover { color: var(--home-accent); }\n.hv-opt.on { color: #000; background: var(--home-accent); }\n\n/* Extra detail that smoothly expands on widget hover (rest mode only). Uses\n * the 0fr→1fr grid trick so it animates real height without a fixed value. */\n.hover-reveal {\n  display: grid;\n  grid-template-rows: 0fr;\n  opacity: 0;\n  transition: grid-template-rows 0.25s ease, opacity 0.2s ease, margin-top 0.25s ease;\n}\n.home-widget:hover .hover-reveal { grid-template-rows: 1fr; opacity: 1; margin-top: 4px; }\n.home-root.editing .hover-reveal { grid-template-rows: 0fr; opacity: 0; margin-top: 0; }\n.hover-reveal > * { overflow: hidden; min-height: 0; }\n\n.home-ghost {\n  position: absolute;\n  border: 1.5px dashed color-mix(in srgb, var(--home-accent) 70%, transparent);\n  border-radius: 8px;\n  background: color-mix(in srgb, var(--home-accent) 7%, transparent);\n  display: none;\n  z-index: 5;\n  pointer-events: none;\n  transition: left 0.18s ease, top 0.18s ease, width 0.18s ease, height 0.18s ease;\n}\n.home-ghost.visible { display: block; }\n.home-ghost.swap {\n  border-color: rgb(45 212 191 / 0.85);\n  background: rgb(45 212 191 / 0.08);\n}\n\n/* ── widget content primitives (responsive to the widget's own size) ── */\n.home-widget .rows { column-gap: 18px; }\n@container (min-width: 380px) {\n  .home-widget .rows { columns: 2; column-rule: 1px solid rgb(255 255 255 / 0.06); }\n}\n@container (min-width: 600px) {\n  .home-widget .rows { columns: 3; }\n}\n.home-widget .row {\n  display: flex;\n  justify-content: space-between;\n  gap: 6px;\n  padding: 1px 0;\n  border-bottom: 1px solid rgb(255 255 255 / 0.04);\n  break-inside: avoid;\n}\n.home-widget .row:last-child { border-bottom: none; }\n\n.home-widget .meters { column-gap: 18px; }\n@container (min-width: 380px) {\n  .home-widget .meters { columns: 2; }\n}\n.home-widget .meter {\n  display: flex;\n  align-items: center;\n  gap: 6px;\n  margin: 3px 0;\n  break-inside: avoid;\n}\n.home-widget .meter .lbl { width: 34px; color: var(--color-muted-foreground, #7d8496); font-size: 10px; }\n.home-widget .meter .track {\n  flex: 1;\n  height: 7px;\n  border-radius: 2px;\n  background: rgb(255 255 255 / 0.07);\n  overflow: hidden;\n}\n.home-widget .meter .fill {\n  height: 100%;\n  background: linear-gradient(90deg, var(--home-accent-dim), var(--home-accent));\n  transition: width 0.6s ease;\n}\n.home-widget .meter .val { width: 44px; text-align: right; font-size: 10px; }\n\n.home-widget .ok { color: var(--home-accent); }\n.home-widget .dim { color: var(--color-muted-foreground, #6b7387); }\n.home-widget .bigval {\n  font-size: min(9cqw, 18cqh);\n  font-weight: 700;\n  color: var(--home-accent);\n}\n\n.home-clock-wrap {\n  display: flex;\n  flex-direction: column;\n  align-items: center;\n  justify-content: center;\n  height: calc(100% - 18px);\n}\n.home-clock {\n  font-size: min(26cqw, 52cqh);\n  font-weight: 800;\n  color: var(--home-accent);\n  letter-spacing: 0.02em;\n  text-shadow: 0 0 24px color-mix(in srgb, var(--home-accent) 35%, transparent);\n  line-height: 1;\n}\n.home-clock-ampm {\n  font-size: 0.32em;\n  vertical-align: 0.9em;\n  margin-left: 0.2em;\n  letter-spacing: 0.05em;\n  color: var(--home-accent-dim);\n}\n.home-clock-sub {\n  color: var(--home-accent-dim);\n  font-size: max(9px, min(3.4cqw, 8cqh));\n  letter-spacing: 0.14em;\n  text-transform: uppercase;\n  margin-top: 1cqh;\n}\n\n.home-ascii-wrap {\n  display: flex;\n  flex-direction: column;\n  align-items: center;\n  justify-content: center;\n  height: calc(100% - 18px);\n}\n.home-ascii {\n  font-size: min(5.6cqw, 5.4cqh);\n  line-height: 1.05;\n  white-space: pre;\n  text-align: center;\n  background: linear-gradient(\n    180deg,\n    var(--home-accent-dim),\n    var(--home-accent) 40%,\n    var(--home-accent) 60%,\n    var(--home-accent-dim)\n  );\n  -webkit-background-clip: text;\n  background-clip: text;\n  color: transparent;\n  filter: drop-shadow(0 0 10px color-mix(in srgb, var(--home-accent) 25%, transparent));\n}\n.home-ascii-caduceus {\n  transform: scaleX(0.88);\n  transform-origin: center;\n}\n.home-ascii-ver {\n  text-align: center;\n  color: var(--home-accent-dim);\n  font-size: max(8px, min(2.6cqw, 5cqh));\n  letter-spacing: 0.22em;\n  margin-top: 1.5cqh;\n}\n\n.home-spark {\n  display: flex;\n  align-items: flex-end;\n  gap: 2px;\n  height: max(18px, 22cqh);\n  margin: 6px 0 4px;\n}\n.home-spark i {\n  flex: 1;\n  background: linear-gradient(180deg, var(--home-accent), var(--home-accent-dim));\n  border-radius: 1px 1px 0 0;\n  opacity: 0.85;\n  transition: height 0.6s ease, opacity 0.15s ease;\n  cursor: default;\n}\n.home-spark i:hover { opacity: 1; }\n\n/* Hover tooltip over a bar (tokens widget). Anchored to the bar via inline\n * `left` + `translateX`, which clamps it inside the clipped widget; the appear/\n * disappear slide+fade runs on the independent `translate` property so it never\n * fights the positioning transform. */\n.home-spark-wrap { position: relative; }\n.home-spark-tip {\n  position: absolute;\n  bottom: 100%;\n  margin-bottom: 6px;\n  padding: 3px 7px;\n  border-radius: 6px;\n  background: color-mix(in srgb, var(--home-accent) 10%, rgb(8 8 12 / 0.96));\n  border: 1px solid var(--home-border);\n  color: rgb(236 236 242);\n  font-size: 10px;\n  line-height: 1.3;\n  white-space: nowrap;\n  pointer-events: none;\n  opacity: 0;\n  translate: 0 4px;\n  transition: opacity 0.18s ease, translate 0.18s ease, transform 0.18s ease;\n  z-index: 6;\n}\n.home-spark-tip.show { opacity: 1; translate: 0 0; }\n.home-spark-tip b { color: var(--home-accent); font-weight: 600; }\n\n/* Line/area chart (tokens widget, alternative to the bars). Stretched to fill\n * via preserveAspectRatio=none; the stroke stays crisp with non-scaling-stroke. */\n.home-area {\n  display: block;\n  width: 100%;\n  height: max(18px, 22cqh);\n  margin: 6px 0 4px;\n  overflow: visible;\n}\n.home-area rect { cursor: default; }\n\n/* Host graphs view: four live sparklines (cpu / ram / load / proc) in a 2×2\n * grid over a rolling one-minute window. Fills the widget below the header\n * (same absolute pattern as the canvas widgets); cells reuse .home-area but\n * stretch to their cell height instead of the tokens widget's fixed band. */\n.host-sparks {\n  position: absolute;\n  inset: 30px 12px 10px;\n  display: grid;\n  grid-template-columns: 1fr 1fr;\n  grid-template-rows: 1fr 1fr;\n  gap: 4px 12px;\n  min-height: 0;\n}\n.host-spark {\n  display: flex;\n  flex-direction: column;\n  min-height: 0;\n  min-width: 0;\n}\n.host-spark-head {\n  display: flex;\n  justify-content: space-between;\n  align-items: baseline;\n  font-size: max(8px, min(3.2cqw, 6cqh));\n  letter-spacing: 0.14em;\n  text-transform: uppercase;\n}\n.host-spark-head .val {\n  font-variant-numeric: tabular-nums;\n  color: var(--home-accent);\n}\n.host-spark .home-area {\n  flex: 1;\n  height: auto;\n  min-height: 12px;\n  margin: 2px 0 0;\n}\n\n/* Small vertical divider between the range arrows and the toggles. */\n.tok-div {\n  width: 1px;\n  align-self: stretch;\n  margin: 2px 2px;\n  background: var(--home-border);\n}\n\n/* Totals line, regrouped: each label sticks to its value, groups spaced evenly\n * (the old `.row` space-between scattered the six tokens across the full width). */\n.tok-stats {\n  display: flex;\n  flex-wrap: wrap;\n  gap: 2px 14px;\n  padding: 3px 0 1px;\n  font-variant-numeric: tabular-nums;\n}\n.tok-stats > span { white-space: nowrap; }\n.tok-stats .dim { margin-right: 2px; }\n\n/* ── logs widget (per-file record list) ── */\n.logs-sub {\n  display: flex;\n  justify-content: space-between;\n  align-items: baseline;\n  gap: 8px;\n}\n.logs-file {\n  font-size: 11px;\n  font-weight: 600;\n  letter-spacing: 0.06em;\n  color: var(--home-accent);\n}\n.home-logs {\n  display: flex;\n  flex-direction: column;\n  gap: 1px;\n  height: calc(100% - 40px);\n  overflow-y: auto;\n  margin-top: 3px;\n}\n.log-row {\n  display: flex;\n  gap: 6px;\n  align-items: baseline;\n  padding: 1px 0;\n  border-bottom: 1px solid rgb(255 255 255 / 0.04);\n  cursor: default;\n}\n.log-row:last-child { border-bottom: none; }\n.log-lvl {\n  flex: none;\n  width: 32px;\n  font-size: 9px;\n  font-weight: 600;\n  letter-spacing: 0.03em;\n}\n.log-lvl.lvl-error { color: var(--home-error); }\n.log-lvl.lvl-warn { color: #f5b945; }\n.log-lvl.lvl-info { color: var(--color-muted-foreground, #6b7387); }\n.log-msg {\n  flex: 1;\n  min-width: 0;\n  font-size: 10px;\n  white-space: nowrap;\n  overflow: hidden;\n  text-overflow: ellipsis;\n}\n\n.home-matrix-c {\n  position: absolute;\n  inset: 0;\n  top: 24px;\n  width: 100%;\n  height: calc(100% - 24px);\n}\n\n/* ── notes widget ── */\n.home-notes { display: flex; flex-direction: column; gap: 1px; height: calc(100% - 18px); overflow-y: auto; }\n.home-notes .note-row {\n  display: flex;\n  align-items: baseline;\n  gap: 7px;\n  padding: 1px 0;\n  border-bottom: 1px solid rgb(255 255 255 / 0.04);\n}\n.home-notes .note-mark {\n  cursor: pointer;\n  width: 12px;\n  text-align: center;\n  color: var(--home-accent);\n  flex-shrink: 0;\n}\n.home-notes .note-mark.done { color: var(--color-muted-foreground, #6b7387); }\n.home-notes .note-text { cursor: text; flex: 1; min-width: 0; overflow-wrap: anywhere; }\n.home-notes .note-text.done {\n  text-decoration: line-through;\n  color: var(--color-muted-foreground, #6b7387);\n}\n.home-notes .note-input {\n  flex: 1;\n  min-width: 0;\n  background: none;\n  border: none;\n  border-bottom: 1px dashed var(--home-border);\n  outline: none;\n  color: inherit;\n  font: inherit;\n  padding: 0;\n}\n.home-notes .note-add {\n  align-self: flex-start;\n  margin-top: 4px;\n  background: none;\n  border: none;\n  cursor: pointer;\n  color: var(--home-accent-dim);\n  font-size: 14px;\n  line-height: 1;\n  padding: 2px 6px 2px 2px;\n}\n.home-notes .note-add:hover { color: var(--home-accent); }\n\n/* ── canvas widgets (heartbeat, life) ── */\n.home-canvas {\n  position: absolute;\n  inset: 0;\n  top: 24px;\n  width: 100%;\n  height: calc(100% - 24px);\n}\n/* Life is drawable in rest mode — signal it with a crosshair. */\n.home-root:not(.editing) .home-life { cursor: crosshair; }\n\n/* ── moon ── */\n.home-moon-wrap {\n  display: flex;\n  flex-direction: column;\n  align-items: center;\n  height: calc(100% - 18px);\n}\n.home-moon-c { flex: 1; width: 100%; min-height: 0; }\n.home-moon-label {\n  color: var(--home-accent-dim);\n  font-size: max(8px, min(3cqw, 6cqh));\n  letter-spacing: 0.14em;\n  text-transform: uppercase;\n}\n\n/* ── pomodoro / countdown ── */\n.home-pomo .home-clock,\n.home-count .home-clock { cursor: pointer; }\n.home-pomo .home-clock.paused { opacity: 0.55; }\n.home-pomo .pomo-sub { cursor: pointer; }\n.home-count .count-label { cursor: pointer; }\n.home-count .count-input,\n.home-pomo .count-input { max-width: 92%; text-align: center; color-scheme: dark; }\n\n/* ── countdown segment editor (alarm-style spinners) ── */\n.count-edit {\n  display: flex;\n  flex-direction: column;\n  align-items: center;\n  justify-content: center;\n  gap: 3px;\n  height: calc(100% - 18px);\n}\n.count-edit-row { display: flex; align-items: center; gap: 5px; }\n.count-seg { display: flex; flex-direction: column; align-items: center; }\n.count-seg .seg-btn {\n  background: none;\n  border: none;\n  cursor: pointer;\n  padding: 0;\n  line-height: 0.6;\n  font-size: 8px;\n  color: var(--home-accent-dim);\n}\n.count-seg .seg-btn:hover { color: var(--home-accent); }\n.count-seg .seg-val {\n  background: none;\n  border: none;\n  outline: none;\n  text-align: center;\n  color: var(--home-accent);\n  font: inherit;\n  font-weight: 800;\n  font-size: max(12px, min(7cqw, 15cqh));\n  padding: 1px 0;\n  border-bottom: 1px solid transparent;\n  letter-spacing: 0.02em;\n}\n.count-seg input.seg-val:focus { border-bottom-color: var(--home-accent); }\n.count-seg .seg-static { cursor: default; }\n.count-colon {\n  font-weight: 800;\n  color: var(--home-accent-dim);\n  font-size: max(12px, min(7cqw, 15cqh));\n}\n.count-done {\n  margin-top: 3px;\n  background: none;\n  border: 1px solid var(--home-border);\n  border-radius: 6px;\n  color: var(--home-accent);\n  cursor: pointer;\n  font: inherit;\n  font-size: 10px;\n  letter-spacing: 0.08em;\n  text-transform: uppercase;\n  padding: 2px 12px;\n}\n.count-done:hover { border-color: var(--home-accent); }\n.home-pomo .pomo-min {\n  font-size: min(20cqw, 40cqh);\n  font-weight: 800;\n  color: var(--home-accent);\n  max-width: 70%;\n}\n/* Hover steppers for the pomodoro work/break lengths. */\n.hover-ctl.pomo-set { flex-direction: column; align-items: flex-end; gap: 1px; }\n.pomo-stepper { display: flex; align-items: center; gap: 3px; }\n.pomo-stepper .hv-label:nth-child(3) { min-width: 16px; text-align: center; color: var(--home-accent); }\n\n/* ── calendar ── */\n.home-cal { height: calc(100% - 18px); display: flex; flex-direction: column; }\n.home-cal-month {\n  text-align: center;\n  color: var(--home-accent-dim);\n  font-size: max(9px, min(3.2cqw, 7cqh));\n  letter-spacing: 0.14em;\n  text-transform: uppercase;\n  margin-bottom: 4px;\n}\n.home-cal-grid {\n  flex: 1;\n  display: grid;\n  grid-template-columns: repeat(7, 1fr);\n  align-content: space-evenly;\n  justify-items: center;\n  font-size: max(8px, min(3cqw, 6.5cqh));\n}\n.home-cal-h { color: var(--color-muted-foreground, #6b7387); }\n.home-cal-d { color: var(--color-foreground, #d8dce6); opacity: 0.75; }\n.home-cal-today {\n  color: #000;\n  background: var(--home-accent);\n  border-radius: 4px;\n  padding: 0 4px;\n  font-weight: 700;\n}\n/* Density tiers, chosen from the widget's cell width (see CalendarWidget). */\n.home-cal.tier-mini .home-cal-month {\n  font-size: max(8px, min(4cqw, 8cqh));\n  margin-bottom: 2px;\n}\n.home-cal.tier-mini .home-cal-grid { font-size: max(9px, min(4cqw, 8cqh)); }\n.home-cal.tier-large .home-cal-month {\n  font-size: max(11px, min(3cqw, 7cqh));\n  margin-bottom: 7px;\n}\n.home-cal.tier-large .home-cal-grid { row-gap: 3px; }\n.home-cal.tier-large .home-cal-h { font-weight: 700; opacity: 0.8; }\n.home-cal.tier-large .home-cal-today { padding: 1px 6px; }\n\n/* ── page chrome ── */\n/* Edit affordance lives BELOW the grid, centered. It fades in once the user\n * starts scrolling down (or immediately when the grid is short enough that\n * there's nothing to scroll), keeping the home clean on first paint. While\n * editing it sticks to the bottom of the viewport so it stays reachable. */\n.home-editbar {\n  display: flex;\n  justify-content: center;\n  gap: 10px;\n  padding: 22px 12px 30px;\n  opacity: 0;\n  transition: opacity 0.25s ease;\n  pointer-events: none;\n}\n.home-editbar.visible {\n  opacity: 1;\n  pointer-events: auto;\n}\n.home-root.editing .home-editbar {\n  position: sticky;\n  bottom: 0;\n}\n.home-fab {\n  position: relative;\n  width: 38px;\n  height: 38px;\n  border-radius: 50%;\n  display: flex;\n  align-items: center;\n  justify-content: center;\n  font-size: 15px;\n  cursor: pointer;\n  color: var(--home-accent);\n  background: var(--home-surface);\n  border: 1px solid var(--home-border);\n  backdrop-filter: blur(12px);\n  -webkit-backdrop-filter: blur(12px);\n  transition:\n    border-color 0.25s ease,\n    background 0.35s ease,\n    box-shadow 0.45s ease,\n    transform 0.4s cubic-bezier(0.34, 1.4, 0.64, 1);\n}\n.home-fab:hover {\n  border-color: var(--home-accent);\n  transform: scale(1.06);\n}\n.home-fab:active { transform: scale(0.94); }\n.home-fab.active {\n  background: color-mix(in srgb, var(--home-accent) 22%, transparent);\n  /* Warm Hermes glow ring when edit mode engages. */\n  animation: home-fab-glow 0.55s ease-out;\n}\n\n/* Crossfading edit ✎ ↔ done ✓ glyphs — each rotates and scales through the\n * swap with a gentle overshoot, matching the dashboard's soft motion. */\n.home-fab-ico {\n  position: absolute;\n  inset: 0;\n  display: flex;\n  align-items: center;\n  justify-content: center;\n  transition:\n    opacity 0.3s ease,\n    transform 0.45s cubic-bezier(0.34, 1.45, 0.64, 1);\n}\n.ico-edit { opacity: 1; transform: rotate(0) scale(1); }\n.ico-done { opacity: 0; transform: rotate(-120deg) scale(0.3); }\n.home-fab.active .ico-edit { opacity: 0; transform: rotate(120deg) scale(0.3); }\n.home-fab.active .ico-done { opacity: 1; transform: rotate(0) scale(1); }\n\n.home-fab-spin {\n  display: inline-block;\n  animation: home-fab-spin-in 0.5s cubic-bezier(0.34, 1.4, 0.64, 1);\n}\n\n/* The restore-default button slides up into place, like the dashboard's\n * dialog-in entrance. */\n.home-fab-enter {\n  animation: home-fab-enter 0.32s cubic-bezier(0.34, 1.3, 0.64, 1);\n}\n\n@keyframes home-fab-glow {\n  0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--home-accent) 55%, transparent); }\n  100% { box-shadow: 0 0 0 13px transparent; }\n}\n@keyframes home-fab-spin-in {\n  from { transform: rotate(-150deg); opacity: 0.3; }\n  to   { transform: rotate(0); opacity: 1; }\n}\n@keyframes home-fab-enter {\n  from { opacity: 0; transform: translateY(6px) scale(0.9); }\n  to   { opacity: 1; transform: translateY(0) scale(1); }\n}\n\n@media (prefers-reduced-motion: reduce) {\n  .home-fab,\n  .home-fab-ico,\n  .home-fab-spin,\n  .home-fab-enter { animation: none; transition: opacity 0.2s ease; }\n}\n\n/* ── toast (plugin-local; the host toast isn't exposed in the SDK) ── */\n.home-toast {\n  position: fixed;\n  bottom: 18px;\n  left: 50%;\n  transform: translateX(-50%);\n  z-index: 80;\n  padding: 8px 16px;\n  border-radius: 8px;\n  font-size: 12px;\n  color: var(--home-error, #e25555);\n  background: var(--home-surface);\n  border: 1px solid var(--home-error, #e25555);\n  backdrop-filter: blur(12px);\n  -webkit-backdrop-filter: blur(12px);\n  box-shadow: 0 8px 24px rgb(0 0 0 / 0.45);\n  animation: home-toast-in 0.25s ease;\n}\n@keyframes home-toast-in {\n  from { opacity: 0; transform: translateX(-50%) translateY(8px); }\n  to { opacity: 1; transform: translateX(-50%) translateY(0); }\n}\n\n/* Catalog reveal: the wrapper animates its row track 0fr → 1fr so the panel\n * grows/collapses its real height smoothly (no grid jump), with a matching\n * fade. Kept mounted so the exit animates too. */\n.home-catalog-wrap {\n  display: grid;\n  grid-template-rows: 0fr;\n  margin: 0 12px;\n  opacity: 0;\n  pointer-events: none;\n  transition:\n    grid-template-rows 0.34s cubic-bezier(0.34, 1.2, 0.64, 1),\n    opacity 0.28s ease,\n    margin-bottom 0.34s ease;\n}\n.home-catalog-wrap.open {\n  grid-template-rows: 1fr;\n  opacity: 1;\n  pointer-events: auto;\n  margin-bottom: 8px;\n}\n.home-catalog {\n  overflow: hidden;\n  min-height: 0;\n  border-radius: 8px;\n  background: var(--home-surface);\n  border: 1px solid var(--home-border);\n  backdrop-filter: blur(12px);\n  -webkit-backdrop-filter: blur(12px);\n  transition: border-color 0.2s ease, background 0.2s ease;\n}\n/* Highlighted as a delete target while a widget is dragged over it. */\n.home-catalog-wrap.trash-active .home-catalog {\n  border-color: var(--home-error);\n  border-style: dashed;\n  background: color-mix(in srgb, var(--home-error) 10%, var(--home-surface));\n}\n.home-catalog-inner {\n  display: flex;\n  flex-wrap: wrap;\n  align-items: center;\n  gap: 8px;\n  padding: 10px;\n}\n.home-catalog-hint {\n  font-size: 10px;\n  letter-spacing: 0.04em;\n  color: var(--color-muted-foreground, #6b7387);\n  margin-right: 4px;\n}\n.home-catalog-wrap.trash-active .home-catalog-hint { color: var(--home-error); }\n.home-catalog-chip { touch-action: none; }\n.home-catalog-chip {\n  font-family: inherit;\n  font-size: 11px;\n  padding: 4px 10px;\n  border-radius: 6px;\n  cursor: pointer;\n  background: none;\n  border: 1px dashed var(--home-border);\n  color: var(--color-foreground, #d8dce6);\n  transition: border-color 0.2s ease, color 0.2s ease, transform 0.2s ease;\n}\n.home-catalog-chip:hover {\n  border-color: var(--home-accent);\n  color: var(--home-accent);\n  transform: translateY(-1px);\n}\n.home-catalog-chip:active { transform: scale(0.95); }\n.home-catalog .empty { color: var(--color-muted-foreground, #6b7387); font-size: 11px; }\n\n@media (prefers-reduced-motion: reduce) {\n  .home-catalog-wrap { transition: opacity 0.2s ease; }\n}\n";
+const homeCss = "/* Home page — rice-style widget grid.\r\n * Every color routes through --home-accent (the active theme's primary),\r\n * so switching themes recolors the whole page with zero widget changes.\r\n * Swap teal (#2dd4bf) stays fixed: it is interaction semantics, not theme. */\r\n\r\n.home-root {\r\n  --home-accent: var(--color-primary, var(--ui-accent, #ffd700));\r\n  --home-accent-dim: color-mix(in srgb, var(--home-accent) 55%, #000);\r\n  --home-surface: color-mix(\r\n    in srgb,\r\n    var(--home-accent) 6%,\r\n    var(--ui-editor-surface-background, rgb(10 10 14 / 0.55))\r\n  );\r\n  --home-border: color-mix(in srgb, var(--home-accent) 18%, transparent);\r\n  --home-error: var(--color-destructive, #e25555);\r\n  position: relative;\r\n  height: 100%;\r\n  overflow: auto;\r\n  font-family: var(--theme-font-mono, ui-monospace, monospace);\r\n  color: var(--color-foreground, var(--ui-text-primary, #d8dce6));\r\n}\r\n\r\n.home-stage {\r\n  position: relative;\r\n  min-height: 60vh;\r\n  touch-action: none;\r\n}\r\n\r\n.home-widget {\r\n  position: absolute;\r\n  border-radius: 8px;\r\n  padding: 10px 12px;\r\n  background: var(--home-surface);\r\n  border: 1px solid var(--home-border);\r\n  backdrop-filter: blur(12px);\r\n  -webkit-backdrop-filter: blur(12px);\r\n  box-shadow: 0 10px 30px rgb(0 0 0 / 0.5);\r\n  overflow: hidden;\r\n  transition: left 0.18s ease, top 0.18s ease;\r\n  container-type: size;\r\n  font-size: 11px;\r\n  line-height: 1.5;\r\n  /* Promote each widget to its own compositor layer so the constantly\r\n   * repainting matrix canvas doesn't force the neighbours' backdrop-filter\r\n   * to recompose every frame — that recomposition is what produced the\r\n   * horizontal flicker sweeping across the glass panels. */\r\n  transform: translateZ(0);\r\n  contain: paint;\r\n}\r\n.home-root.editing .home-widget { user-select: none; }\r\n.home-widget.dragging {\r\n  transition: none;\r\n  opacity: 0.9;\r\n  border-color: var(--home-accent);\r\n  z-index: 50;\r\n  cursor: grabbing;\r\n}\r\n.home-widget.swap-target {\r\n  border-color: #2dd4bf;\r\n  box-shadow: 0 0 0 1px rgb(45 212 191 / 0.5), 0 10px 30px rgb(0 0 0 / 0.5);\r\n}\r\n/* Over the trash zone — about to be deleted. */\r\n.home-widget.trashing {\r\n  opacity: 0.45;\r\n  border-color: var(--home-error);\r\n  box-shadow: 0 0 0 1px color-mix(in srgb, var(--home-error) 60%, transparent),\r\n    0 10px 30px rgb(0 0 0 / 0.5);\r\n}\r\n\r\n/* Floating label that follows the pointer while dragging a new widget in. */\r\n.home-add-ghost {\r\n  position: fixed;\r\n  z-index: 70;\r\n  transform: translate(-50%, -140%);\r\n  padding: 4px 10px;\r\n  border-radius: 6px;\r\n  font-size: 11px;\r\n  white-space: nowrap;\r\n  pointer-events: none;\r\n  color: var(--home-accent);\r\n  background: var(--home-surface);\r\n  border: 1px solid var(--home-accent);\r\n  backdrop-filter: blur(12px);\r\n  -webkit-backdrop-filter: blur(12px);\r\n  box-shadow: 0 8px 24px rgb(0 0 0 / 0.45);\r\n}\r\n\r\n.home-widget .hd {\r\n  display: block;\r\n  font-size: 9px;\r\n  letter-spacing: 0.18em;\r\n  margin-bottom: 6px;\r\n  font-weight: 700;\r\n  text-transform: uppercase;\r\n  color: var(--home-accent-dim);\r\n  white-space: nowrap;\r\n  overflow: hidden;\r\n}\r\n.home-widget .hd::before { content: \"── \"; opacity: 0.5; }\r\n.home-widget .hd::after { content: \" ─────────────────────────────────\"; opacity: 0.3; }\r\n.home-root.editing .home-widget .hd { cursor: grab; }\r\n\r\n.home-widget .rs {\r\n  position: absolute;\r\n  right: 2px;\r\n  bottom: 2px;\r\n  width: 13px;\r\n  height: 13px;\r\n  cursor: nwse-resize;\r\n  border-right: 2px solid color-mix(in srgb, var(--home-accent) 45%, transparent);\r\n  border-bottom: 2px solid color-mix(in srgb, var(--home-accent) 45%, transparent);\r\n  border-radius: 2px;\r\n  z-index: 3;\r\n}\r\n.home-widget .wremove {\r\n  position: absolute;\r\n  top: 4px;\r\n  right: 6px;\r\n  z-index: 3;\r\n  background: none;\r\n  border: none;\r\n  color: var(--home-error);\r\n  font-size: 13px;\r\n  line-height: 1;\r\n  cursor: pointer;\r\n  padding: 2px 4px;\r\n}\r\n.home-widget .werr { color: var(--home-error); }\r\n\r\n/* ── hover controls (contextual chrome, rest mode only) ──\r\n * Reusable floating control rendered inside a widget body. Hidden by default,\r\n * fades in while hovering the widget, and fully suppressed in edit mode so it\r\n * never fights drag/resize. Widgets opt in by rendering <HoverCtl>/<HoverArrows>. */\r\n.hover-ctl {\r\n  position: absolute;\r\n  top: 4px;\r\n  right: 6px;\r\n  z-index: 4;\r\n  display: flex;\r\n  align-items: center;\r\n  gap: 4px;\r\n  opacity: 0;\r\n  pointer-events: none;\r\n  transition: opacity 0.18s ease;\r\n  /* Sits on the glass without a hard edge. */\r\n  padding: 1px 3px;\r\n  border-radius: 6px;\r\n  background: color-mix(in srgb, var(--home-surface) 80%, transparent);\r\n}\r\n.home-widget:hover .hover-ctl,\r\n.hover-ctl:focus-within { opacity: 1; pointer-events: auto; }\r\n.home-root.editing .hover-ctl { display: none; }\r\n@media (hover: none) {\r\n  /* Touch: no hover, so keep controls reachable but understated. */\r\n  .hover-ctl { opacity: 0.5; pointer-events: auto; }\r\n}\r\n\r\n.hv-arrow {\r\n  background: none;\r\n  border: none;\r\n  cursor: pointer;\r\n  padding: 0 3px;\r\n  color: var(--home-accent-dim);\r\n  font-size: 14px;\r\n  line-height: 1;\r\n  font-family: inherit;\r\n}\r\n.hv-arrow:hover:not(:disabled) { color: var(--home-accent); }\r\n.hv-arrow:disabled { opacity: 0.3; cursor: default; }\r\n.hv-label {\r\n  font-size: 9px;\r\n  letter-spacing: 0.1em;\r\n  text-transform: uppercase;\r\n  color: var(--home-accent-dim);\r\n  white-space: nowrap;\r\n}\r\n.hv-label-btn {\r\n  background: none;\r\n  border: none;\r\n  cursor: pointer;\r\n  font: inherit;\r\n  letter-spacing: 0.1em;\r\n  padding: 0;\r\n}\r\n.hv-label-btn:hover { color: var(--home-accent); }\r\n\r\n/* Toggle/option buttons inside a hover control (clock format, host view…). */\r\n.hv-opt {\r\n  background: none;\r\n  border: none;\r\n  cursor: pointer;\r\n  font: inherit;\r\n  font-size: 9px;\r\n  letter-spacing: 0.08em;\r\n  text-transform: uppercase;\r\n  color: var(--home-accent-dim);\r\n  padding: 0 4px;\r\n  border-radius: 4px;\r\n}\r\n.hv-opt:hover { color: var(--home-accent); }\r\n.hv-opt.on { color: #000; background: var(--home-accent); }\r\n\r\n/* Extra detail that smoothly expands on widget hover (rest mode only). Uses\r\n * the 0fr→1fr grid trick so it animates real height without a fixed value. */\r\n.hover-reveal {\r\n  display: grid;\r\n  grid-template-rows: 0fr;\r\n  opacity: 0;\r\n  transition: grid-template-rows 0.25s ease, opacity 0.2s ease, margin-top 0.25s ease;\r\n}\r\n.home-widget:hover .hover-reveal { grid-template-rows: 1fr; opacity: 1; margin-top: 4px; }\r\n.home-root.editing .hover-reveal { grid-template-rows: 0fr; opacity: 0; margin-top: 0; }\r\n.hover-reveal > * { overflow: hidden; min-height: 0; }\r\n\r\n.home-ghost {\r\n  position: absolute;\r\n  border: 1.5px dashed color-mix(in srgb, var(--home-accent) 70%, transparent);\r\n  border-radius: 8px;\r\n  background: color-mix(in srgb, var(--home-accent) 7%, transparent);\r\n  display: none;\r\n  z-index: 5;\r\n  pointer-events: none;\r\n  transition: left 0.18s ease, top 0.18s ease, width 0.18s ease, height 0.18s ease;\r\n}\r\n.home-ghost.visible { display: block; }\r\n.home-ghost.swap {\r\n  border-color: rgb(45 212 191 / 0.85);\r\n  background: rgb(45 212 191 / 0.08);\r\n}\r\n\r\n/* ── widget content primitives (responsive to the widget's own size) ── */\r\n.home-widget .rows { column-gap: 18px; }\r\n@container (min-width: 380px) {\r\n  .home-widget .rows { columns: 2; column-rule: 1px solid rgb(255 255 255 / 0.06); }\r\n}\r\n@container (min-width: 600px) {\r\n  .home-widget .rows { columns: 3; }\r\n}\r\n.home-widget .row {\r\n  display: flex;\r\n  justify-content: space-between;\r\n  gap: 6px;\r\n  padding: 1px 0;\r\n  border-bottom: 1px solid rgb(255 255 255 / 0.04);\r\n  break-inside: avoid;\r\n}\r\n.home-widget .row:last-child { border-bottom: none; }\r\n\r\n.home-widget .meters { column-gap: 18px; }\r\n@container (min-width: 380px) {\r\n  .home-widget .meters { columns: 2; }\r\n}\r\n.home-widget .meter {\r\n  display: flex;\r\n  align-items: center;\r\n  gap: 6px;\r\n  margin: 3px 0;\r\n  break-inside: avoid;\r\n}\r\n.home-widget .meter .lbl { width: 34px; color: var(--color-muted-foreground, #7d8496); font-size: 10px; }\r\n.home-widget .meter .track {\r\n  flex: 1;\r\n  height: 7px;\r\n  border-radius: 2px;\r\n  background: rgb(255 255 255 / 0.07);\r\n  overflow: hidden;\r\n}\r\n.home-widget .meter .fill {\r\n  height: 100%;\r\n  background: linear-gradient(90deg, var(--home-accent-dim), var(--home-accent));\r\n  transition: width 0.6s ease;\r\n}\r\n.home-widget .meter .val { width: 44px; text-align: right; font-size: 10px; }\r\n\r\n.home-widget .ok { color: var(--home-accent); }\r\n.home-widget .dim { color: var(--color-muted-foreground, #6b7387); }\r\n.home-widget .bigval {\r\n  font-size: min(9cqw, 18cqh);\r\n  font-weight: 700;\r\n  color: var(--home-accent);\r\n}\r\n\r\n.home-clock-wrap {\r\n  display: flex;\r\n  flex-direction: column;\r\n  align-items: center;\r\n  justify-content: center;\r\n  height: calc(100% - 18px);\r\n}\r\n.home-clock {\r\n  font-size: min(26cqw, 52cqh);\r\n  font-weight: 800;\r\n  color: var(--home-accent);\r\n  letter-spacing: 0.02em;\r\n  text-shadow: 0 0 24px color-mix(in srgb, var(--home-accent) 35%, transparent);\r\n  line-height: 1;\r\n}\r\n.home-clock-ampm {\r\n  font-size: 0.32em;\r\n  vertical-align: 0.9em;\r\n  margin-left: 0.2em;\r\n  letter-spacing: 0.05em;\r\n  color: var(--home-accent-dim);\r\n}\r\n.home-clock-sub {\r\n  color: var(--home-accent-dim);\r\n  font-size: max(9px, min(3.4cqw, 8cqh));\r\n  letter-spacing: 0.14em;\r\n  text-transform: uppercase;\r\n  margin-top: 1cqh;\r\n}\r\n\r\n.home-ascii-wrap {\r\n  display: flex;\r\n  flex-direction: column;\r\n  align-items: center;\r\n  justify-content: center;\r\n  height: calc(100% - 18px);\r\n}\r\n.home-ascii {\r\n  font-size: min(5.6cqw, 5.4cqh);\r\n  line-height: 1.05;\r\n  white-space: pre;\r\n  text-align: center;\r\n  background: linear-gradient(\r\n    180deg,\r\n    var(--home-accent-dim),\r\n    var(--home-accent) 40%,\r\n    var(--home-accent) 60%,\r\n    var(--home-accent-dim)\r\n  );\r\n  -webkit-background-clip: text;\r\n  background-clip: text;\r\n  color: transparent;\r\n  filter: drop-shadow(0 0 10px color-mix(in srgb, var(--home-accent) 25%, transparent));\r\n}\r\n.home-ascii-caduceus {\r\n  transform: scaleX(0.88);\r\n  transform-origin: center;\r\n}\r\n.home-ascii-ver {\r\n  text-align: center;\r\n  color: var(--home-accent-dim);\r\n  font-size: max(8px, min(2.6cqw, 5cqh));\r\n  letter-spacing: 0.22em;\r\n  margin-top: 1.5cqh;\r\n}\r\n\r\n.home-spark {\r\n  display: flex;\r\n  align-items: flex-end;\r\n  gap: 2px;\r\n  height: max(18px, 22cqh);\r\n  margin: 6px 0 4px;\r\n}\r\n.home-spark i {\r\n  flex: 1;\r\n  background: linear-gradient(180deg, var(--home-accent), var(--home-accent-dim));\r\n  border-radius: 1px 1px 0 0;\r\n  opacity: 0.85;\r\n  transition: height 0.6s ease, opacity 0.15s ease;\r\n  cursor: default;\r\n}\r\n.home-spark i:hover { opacity: 1; }\r\n\r\n/* Hover tooltip over a bar (tokens widget). Anchored to the bar via inline\r\n * `left` + `translateX`, which clamps it inside the clipped widget; the appear/\r\n * disappear slide+fade runs on the independent `translate` property so it never\r\n * fights the positioning transform. */\r\n.home-spark-wrap { position: relative; }\r\n.home-spark-tip {\r\n  position: absolute;\r\n  bottom: 100%;\r\n  margin-bottom: 6px;\r\n  padding: 3px 7px;\r\n  border-radius: 6px;\r\n  background: color-mix(in srgb, var(--home-accent) 10%, rgb(8 8 12 / 0.96));\r\n  border: 1px solid var(--home-border);\r\n  color: rgb(236 236 242);\r\n  font-size: 10px;\r\n  line-height: 1.3;\r\n  white-space: nowrap;\r\n  pointer-events: none;\r\n  opacity: 0;\r\n  translate: 0 4px;\r\n  transition: opacity 0.18s ease, translate 0.18s ease, transform 0.18s ease;\r\n  z-index: 6;\r\n}\r\n.home-spark-tip.show { opacity: 1; translate: 0 0; }\r\n.home-spark-tip b { color: var(--home-accent); font-weight: 600; }\r\n\r\n/* Line/area chart (tokens widget, alternative to the bars). Stretched to fill\r\n * via preserveAspectRatio=none; the stroke stays crisp with non-scaling-stroke. */\r\n.home-area {\r\n  display: block;\r\n  width: 100%;\r\n  height: max(18px, 22cqh);\r\n  margin: 6px 0 4px;\r\n  overflow: visible;\r\n}\r\n.home-area rect { cursor: default; }\r\n\r\n/* Host graphs view: four live sparklines (cpu / ram / load / proc) in a 2×2\r\n * grid over a rolling one-minute window. Fills the widget below the header\r\n * (same absolute pattern as the canvas widgets); cells reuse .home-area but\r\n * stretch to their cell height instead of the tokens widget's fixed band. */\r\n.host-sparks {\r\n  position: absolute;\r\n  inset: 30px 12px 10px;\r\n  display: grid;\r\n  grid-template-columns: 1fr 1fr;\r\n  grid-template-rows: 1fr 1fr;\r\n  gap: 4px 12px;\r\n  min-height: 0;\r\n}\r\n.host-spark {\r\n  display: flex;\r\n  flex-direction: column;\r\n  min-height: 0;\r\n  min-width: 0;\r\n}\r\n.host-spark-head {\r\n  display: flex;\r\n  justify-content: space-between;\r\n  align-items: baseline;\r\n  font-size: max(8px, min(3.2cqw, 6cqh));\r\n  letter-spacing: 0.14em;\r\n  text-transform: uppercase;\r\n}\r\n.host-spark-head .val {\r\n  font-variant-numeric: tabular-nums;\r\n  color: var(--home-accent);\r\n}\r\n.host-spark .home-area {\r\n  flex: 1;\r\n  height: auto;\r\n  min-height: 12px;\r\n  margin: 2px 0 0;\r\n}\r\n\r\n/* Small vertical divider between the range arrows and the toggles. */\r\n.tok-div {\r\n  width: 1px;\r\n  align-self: stretch;\r\n  margin: 2px 2px;\r\n  background: var(--home-border);\r\n}\r\n\r\n/* Totals line, regrouped: each label sticks to its value, groups spaced evenly\r\n * (the old `.row` space-between scattered the six tokens across the full width). */\r\n.tok-stats {\r\n  display: flex;\r\n  flex-wrap: wrap;\r\n  gap: 2px 14px;\r\n  padding: 3px 0 1px;\r\n  font-variant-numeric: tabular-nums;\r\n}\r\n.tok-stats > span { white-space: nowrap; }\r\n.tok-stats .dim { margin-right: 2px; }\r\n\r\n/* ── logs widget (per-file record list) ── */\r\n.logs-sub {\r\n  display: flex;\r\n  justify-content: space-between;\r\n  align-items: baseline;\r\n  gap: 8px;\r\n}\r\n.logs-file {\r\n  font-size: 11px;\r\n  font-weight: 600;\r\n  letter-spacing: 0.06em;\r\n  color: var(--home-accent);\r\n}\r\n.home-logs {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 1px;\r\n  height: calc(100% - 40px);\r\n  overflow-y: auto;\r\n  margin-top: 3px;\r\n}\r\n.log-row {\r\n  display: flex;\r\n  gap: 6px;\r\n  align-items: baseline;\r\n  padding: 1px 0;\r\n  border-bottom: 1px solid rgb(255 255 255 / 0.04);\r\n  cursor: default;\r\n}\r\n.log-row:last-child { border-bottom: none; }\r\n.log-lvl {\r\n  flex: none;\r\n  width: 32px;\r\n  font-size: 9px;\r\n  font-weight: 600;\r\n  letter-spacing: 0.03em;\r\n}\r\n.log-lvl.lvl-error { color: var(--home-error); }\r\n.log-lvl.lvl-warn { color: #f5b945; }\r\n.log-lvl.lvl-info { color: var(--color-muted-foreground, #6b7387); }\r\n.log-msg {\r\n  flex: 1;\r\n  min-width: 0;\r\n  font-size: 10px;\r\n  white-space: nowrap;\r\n  overflow: hidden;\r\n  text-overflow: ellipsis;\r\n}\r\n\r\n.home-matrix-c {\r\n  position: absolute;\r\n  inset: 0;\r\n  top: 24px;\r\n  width: 100%;\r\n  height: calc(100% - 24px);\r\n}\r\n\r\n/* ── notes widget ── */\r\n.home-notes { display: flex; flex-direction: column; gap: 1px; height: calc(100% - 18px); overflow-y: auto; }\r\n.home-notes .note-row {\r\n  display: flex;\r\n  align-items: baseline;\r\n  gap: 7px;\r\n  padding: 1px 0;\r\n  border-bottom: 1px solid rgb(255 255 255 / 0.04);\r\n}\r\n.home-notes .note-mark {\r\n  cursor: pointer;\r\n  width: 12px;\r\n  text-align: center;\r\n  color: var(--home-accent);\r\n  flex-shrink: 0;\r\n}\r\n.home-notes .note-mark.done { color: var(--color-muted-foreground, #6b7387); }\r\n.home-notes .note-text { cursor: text; flex: 1; min-width: 0; overflow-wrap: anywhere; }\r\n.home-notes .note-text.done {\r\n  text-decoration: line-through;\r\n  color: var(--color-muted-foreground, #6b7387);\r\n}\r\n.home-notes .note-input {\r\n  flex: 1;\r\n  min-width: 0;\r\n  background: none;\r\n  border: none;\r\n  border-bottom: 1px dashed var(--home-border);\r\n  outline: none;\r\n  color: inherit;\r\n  font: inherit;\r\n  padding: 0;\r\n}\r\n.home-notes .note-add {\r\n  align-self: flex-start;\r\n  margin-top: 4px;\r\n  background: none;\r\n  border: none;\r\n  cursor: pointer;\r\n  color: var(--home-accent-dim);\r\n  font-size: 14px;\r\n  line-height: 1;\r\n  padding: 2px 6px 2px 2px;\r\n}\r\n.home-notes .note-add:hover { color: var(--home-accent); }\r\n\r\n/* ── canvas widgets (heartbeat, life) ── */\r\n.home-canvas {\r\n  position: absolute;\r\n  inset: 0;\r\n  top: 24px;\r\n  width: 100%;\r\n  height: calc(100% - 24px);\r\n}\r\n/* Life is drawable in rest mode — signal it with a crosshair. */\r\n.home-root:not(.editing) .home-life { cursor: crosshair; }\r\n\r\n/* ── moon ── */\r\n.home-moon-wrap {\r\n  display: flex;\r\n  flex-direction: column;\r\n  align-items: center;\r\n  height: calc(100% - 18px);\r\n}\r\n.home-moon-c { flex: 1; width: 100%; min-height: 0; }\r\n.home-moon-label {\r\n  color: var(--home-accent-dim);\r\n  font-size: max(8px, min(3cqw, 6cqh));\r\n  letter-spacing: 0.14em;\r\n  text-transform: uppercase;\r\n}\r\n\r\n/* ── pomodoro / countdown ── */\r\n.home-pomo .home-clock,\r\n.home-count .home-clock { cursor: pointer; }\r\n.home-pomo .home-clock.paused { opacity: 0.55; }\r\n.home-pomo .pomo-sub { cursor: pointer; }\r\n.home-count .count-label { cursor: pointer; }\r\n.home-count .count-input,\r\n.home-pomo .count-input { max-width: 92%; text-align: center; color-scheme: dark; }\r\n\r\n/* ── countdown segment editor (alarm-style spinners) ── */\r\n.count-edit {\r\n  display: flex;\r\n  flex-direction: column;\r\n  align-items: center;\r\n  justify-content: center;\r\n  gap: 3px;\r\n  height: calc(100% - 18px);\r\n}\r\n.count-edit-row { display: flex; align-items: center; gap: 5px; }\r\n.count-seg { display: flex; flex-direction: column; align-items: center; }\r\n.count-seg .seg-btn {\r\n  background: none;\r\n  border: none;\r\n  cursor: pointer;\r\n  padding: 0;\r\n  line-height: 0.6;\r\n  font-size: 8px;\r\n  color: var(--home-accent-dim);\r\n}\r\n.count-seg .seg-btn:hover { color: var(--home-accent); }\r\n.count-seg .seg-val {\r\n  background: none;\r\n  border: none;\r\n  outline: none;\r\n  text-align: center;\r\n  color: var(--home-accent);\r\n  font: inherit;\r\n  font-weight: 800;\r\n  font-size: max(12px, min(7cqw, 15cqh));\r\n  padding: 1px 0;\r\n  border-bottom: 1px solid transparent;\r\n  letter-spacing: 0.02em;\r\n}\r\n.count-seg input.seg-val:focus { border-bottom-color: var(--home-accent); }\r\n.count-seg .seg-static { cursor: default; }\r\n.count-colon {\r\n  font-weight: 800;\r\n  color: var(--home-accent-dim);\r\n  font-size: max(12px, min(7cqw, 15cqh));\r\n}\r\n.count-done {\r\n  margin-top: 3px;\r\n  background: none;\r\n  border: 1px solid var(--home-border);\r\n  border-radius: 6px;\r\n  color: var(--home-accent);\r\n  cursor: pointer;\r\n  font: inherit;\r\n  font-size: 10px;\r\n  letter-spacing: 0.08em;\r\n  text-transform: uppercase;\r\n  padding: 2px 12px;\r\n}\r\n.count-done:hover { border-color: var(--home-accent); }\r\n.home-pomo .pomo-min {\r\n  font-size: min(20cqw, 40cqh);\r\n  font-weight: 800;\r\n  color: var(--home-accent);\r\n  max-width: 70%;\r\n}\r\n/* Hover steppers for the pomodoro work/break lengths. */\r\n.hover-ctl.pomo-set { flex-direction: column; align-items: flex-end; gap: 1px; }\r\n.pomo-stepper { display: flex; align-items: center; gap: 3px; }\r\n.pomo-stepper .hv-label:nth-child(3) { min-width: 16px; text-align: center; color: var(--home-accent); }\r\n\r\n/* ── calendar ── */\r\n.home-cal { height: calc(100% - 18px); display: flex; flex-direction: column; }\r\n.home-cal-month {\r\n  text-align: center;\r\n  color: var(--home-accent-dim);\r\n  font-size: max(9px, min(3.2cqw, 7cqh));\r\n  letter-spacing: 0.14em;\r\n  text-transform: uppercase;\r\n  margin-bottom: 4px;\r\n}\r\n.home-cal-grid {\r\n  flex: 1;\r\n  display: grid;\r\n  grid-template-columns: repeat(7, 1fr);\r\n  align-content: space-evenly;\r\n  justify-items: center;\r\n  font-size: max(8px, min(3cqw, 6.5cqh));\r\n}\r\n.home-cal-h { color: var(--color-muted-foreground, #6b7387); }\r\n.home-cal-d { color: var(--color-foreground, #d8dce6); opacity: 0.75; }\r\n.home-cal-today {\r\n  color: #000;\r\n  background: var(--home-accent);\r\n  border-radius: 4px;\r\n  padding: 0 4px;\r\n  font-weight: 700;\r\n}\r\n/* Density tiers, chosen from the widget's cell width (see CalendarWidget). */\r\n.home-cal.tier-mini .home-cal-month {\r\n  font-size: max(8px, min(4cqw, 8cqh));\r\n  margin-bottom: 2px;\r\n}\r\n.home-cal.tier-mini .home-cal-grid { font-size: max(9px, min(4cqw, 8cqh)); }\r\n.home-cal.tier-large .home-cal-month {\r\n  font-size: max(11px, min(3cqw, 7cqh));\r\n  margin-bottom: 7px;\r\n}\r\n.home-cal.tier-large .home-cal-grid { row-gap: 3px; }\r\n.home-cal.tier-large .home-cal-h { font-weight: 700; opacity: 0.8; }\r\n.home-cal.tier-large .home-cal-today { padding: 1px 6px; }\r\n\r\n/* ── page chrome ── */\r\n/* Edit affordance lives BELOW the grid, centered. It fades in once the user\r\n * starts scrolling down (or immediately when the grid is short enough that\r\n * there's nothing to scroll), keeping the home clean on first paint. While\r\n * editing it sticks to the bottom of the viewport so it stays reachable. */\r\n.home-editbar {\r\n  display: flex;\r\n  justify-content: center;\r\n  gap: 10px;\r\n  padding: 22px 12px 30px;\r\n  opacity: 0;\r\n  transition: opacity 0.25s ease;\r\n  pointer-events: none;\r\n}\r\n.home-editbar.visible {\r\n  opacity: 1;\r\n  pointer-events: auto;\r\n}\r\n.home-root.editing .home-editbar {\r\n  position: sticky;\r\n  bottom: 0;\r\n}\r\n.home-fab {\r\n  position: relative;\r\n  width: 38px;\r\n  height: 38px;\r\n  border-radius: 50%;\r\n  display: flex;\r\n  align-items: center;\r\n  justify-content: center;\r\n  font-size: 15px;\r\n  cursor: pointer;\r\n  color: var(--home-accent);\r\n  background: var(--home-surface);\r\n  border: 1px solid var(--home-border);\r\n  backdrop-filter: blur(12px);\r\n  -webkit-backdrop-filter: blur(12px);\r\n  transition:\r\n    border-color 0.25s ease,\r\n    background 0.35s ease,\r\n    box-shadow 0.45s ease,\r\n    transform 0.4s cubic-bezier(0.34, 1.4, 0.64, 1);\r\n}\r\n.home-fab:hover {\r\n  border-color: var(--home-accent);\r\n  transform: scale(1.06);\r\n}\r\n.home-fab:active { transform: scale(0.94); }\r\n.home-fab.active {\r\n  background: color-mix(in srgb, var(--home-accent) 22%, transparent);\r\n  /* Warm Hermes glow ring when edit mode engages. */\r\n  animation: home-fab-glow 0.55s ease-out;\r\n}\r\n\r\n/* Crossfading edit ✎ ↔ done ✓ glyphs — each rotates and scales through the\r\n * swap with a gentle overshoot, matching the dashboard's soft motion. */\r\n.home-fab-ico {\r\n  position: absolute;\r\n  inset: 0;\r\n  display: flex;\r\n  align-items: center;\r\n  justify-content: center;\r\n  transition:\r\n    opacity 0.3s ease,\r\n    transform 0.45s cubic-bezier(0.34, 1.45, 0.64, 1);\r\n}\r\n.ico-edit { opacity: 1; transform: rotate(0) scale(1); }\r\n.ico-done { opacity: 0; transform: rotate(-120deg) scale(0.3); }\r\n.home-fab.active .ico-edit { opacity: 0; transform: rotate(120deg) scale(0.3); }\r\n.home-fab.active .ico-done { opacity: 1; transform: rotate(0) scale(1); }\r\n\r\n.home-fab-spin {\r\n  display: inline-block;\r\n  animation: home-fab-spin-in 0.5s cubic-bezier(0.34, 1.4, 0.64, 1);\r\n}\r\n\r\n/* The restore-default button slides up into place, like the dashboard's\r\n * dialog-in entrance. */\r\n.home-fab-enter {\r\n  animation: home-fab-enter 0.32s cubic-bezier(0.34, 1.3, 0.64, 1);\r\n}\r\n\r\n@keyframes home-fab-glow {\r\n  0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--home-accent) 55%, transparent); }\r\n  100% { box-shadow: 0 0 0 13px transparent; }\r\n}\r\n@keyframes home-fab-spin-in {\r\n  from { transform: rotate(-150deg); opacity: 0.3; }\r\n  to   { transform: rotate(0); opacity: 1; }\r\n}\r\n@keyframes home-fab-enter {\r\n  from { opacity: 0; transform: translateY(6px) scale(0.9); }\r\n  to   { opacity: 1; transform: translateY(0) scale(1); }\r\n}\r\n\r\n@media (prefers-reduced-motion: reduce) {\r\n  .home-fab,\r\n  .home-fab-ico,\r\n  .home-fab-spin,\r\n  .home-fab-enter { animation: none; transition: opacity 0.2s ease; }\r\n}\r\n\r\n/* ── toast (plugin-local; the host toast isn't exposed in the SDK) ── */\r\n.home-toast {\r\n  position: fixed;\r\n  bottom: 18px;\r\n  left: 50%;\r\n  transform: translateX(-50%);\r\n  z-index: 80;\r\n  padding: 8px 16px;\r\n  border-radius: 8px;\r\n  font-size: 12px;\r\n  color: var(--home-error, #e25555);\r\n  background: var(--home-surface);\r\n  border: 1px solid var(--home-error, #e25555);\r\n  backdrop-filter: blur(12px);\r\n  -webkit-backdrop-filter: blur(12px);\r\n  box-shadow: 0 8px 24px rgb(0 0 0 / 0.45);\r\n  animation: home-toast-in 0.25s ease;\r\n}\r\n@keyframes home-toast-in {\r\n  from { opacity: 0; transform: translateX(-50%) translateY(8px); }\r\n  to { opacity: 1; transform: translateX(-50%) translateY(0); }\r\n}\r\n\r\n/* Catalog reveal: the wrapper animates its row track 0fr → 1fr so the panel\r\n * grows/collapses its real height smoothly (no grid jump), with a matching\r\n * fade. Kept mounted so the exit animates too. */\r\n.home-catalog-wrap {\r\n  display: grid;\r\n  grid-template-rows: 0fr;\r\n  margin: 0 12px;\r\n  opacity: 0;\r\n  pointer-events: none;\r\n  transition:\r\n    grid-template-rows 0.34s cubic-bezier(0.34, 1.2, 0.64, 1),\r\n    opacity 0.28s ease,\r\n    margin-bottom 0.34s ease;\r\n}\r\n.home-catalog-wrap.open {\r\n  grid-template-rows: 1fr;\r\n  opacity: 1;\r\n  pointer-events: auto;\r\n  margin-bottom: 8px;\r\n}\r\n.home-catalog {\r\n  overflow: hidden;\r\n  min-height: 0;\r\n  border-radius: 8px;\r\n  background: var(--home-surface);\r\n  border: 1px solid var(--home-border);\r\n  backdrop-filter: blur(12px);\r\n  -webkit-backdrop-filter: blur(12px);\r\n  transition: border-color 0.2s ease, background 0.2s ease;\r\n}\r\n/* Highlighted as a delete target while a widget is dragged over it. */\r\n.home-catalog-wrap.trash-active .home-catalog {\r\n  border-color: var(--home-error);\r\n  border-style: dashed;\r\n  background: color-mix(in srgb, var(--home-error) 10%, var(--home-surface));\r\n}\r\n.home-catalog-inner {\r\n  display: flex;\r\n  flex-wrap: wrap;\r\n  align-items: center;\r\n  gap: 8px;\r\n  padding: 10px;\r\n}\r\n.home-catalog-hint {\r\n  font-size: 10px;\r\n  letter-spacing: 0.04em;\r\n  color: var(--color-muted-foreground, #6b7387);\r\n  margin-right: 4px;\r\n}\r\n.home-catalog-wrap.trash-active .home-catalog-hint { color: var(--home-error); }\r\n.home-catalog-chip { touch-action: none; }\r\n.home-catalog-chip {\r\n  font-family: inherit;\r\n  font-size: 11px;\r\n  padding: 4px 10px;\r\n  border-radius: 6px;\r\n  cursor: pointer;\r\n  background: none;\r\n  border: 1px dashed var(--home-border);\r\n  color: var(--color-foreground, #d8dce6);\r\n  transition: border-color 0.2s ease, color 0.2s ease, transform 0.2s ease;\r\n}\r\n.home-catalog-chip:hover {\r\n  border-color: var(--home-accent);\r\n  color: var(--home-accent);\r\n  transform: translateY(-1px);\r\n}\r\n.home-catalog-chip:active { transform: scale(0.95); }\r\n.home-catalog .empty { color: var(--color-muted-foreground, #6b7387); font-size: 11px; }\r\n\r\n@media (prefers-reduced-motion: reduce) {\r\n  .home-catalog-wrap { transition: opacity 0.2s ease; }\r\n}\r\n\r\n/* ── Agent widget (the eye) ─────────────────────────────────────────── */\r\n\r\n.home-agent {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 6px;\r\n  height: 100%;\r\n  min-height: 0;\r\n  overflow: hidden;\r\n  font-size: 11px;\r\n}\r\n\r\n.home-agent-head {\r\n  display: flex;\r\n  align-items: center;\r\n  gap: 6px;\r\n  flex-wrap: wrap;\r\n  min-height: 18px;\r\n}\r\n\r\n.home-agent-dot {\r\n  width: 8px;\r\n  height: 8px;\r\n  border-radius: 50%;\r\n  background: var(--home-accent);\r\n  opacity: 0.45;\r\n  flex: none;\r\n  box-shadow: 0 0 6px var(--home-accent);\r\n}\r\n.home-agent-dot.busy {\r\n  opacity: 1;\r\n  animation: home-agent-pulse 1.2s ease-in-out infinite;\r\n}\r\n@keyframes home-agent-pulse {\r\n  0%, 100% { opacity: 1; transform: scale(1); }\r\n  50% { opacity: 0.35; transform: scale(0.8); }\r\n}\r\n\r\n.home-agent-status {\r\n  text-transform: uppercase;\r\n  letter-spacing: 0.08em;\r\n  font-size: 10px;\r\n  color: var(--color-foreground, #d8dce6);\r\n}\r\n\r\n.home-agent-tool {\r\n  color: var(--home-accent);\r\n  font-size: 10px;\r\n  overflow: hidden;\r\n  text-overflow: ellipsis;\r\n  white-space: nowrap;\r\n  max-width: 40%;\r\n}\r\n\r\n.home-agent-take {\r\n  margin-left: auto;\r\n  background: transparent;\r\n  border: 1px solid var(--home-border);\r\n  color: var(--home-accent);\r\n  border-radius: 6px;\r\n  font-size: 10px;\r\n  font-family: inherit;\r\n  padding: 2px 8px;\r\n  cursor: pointer;\r\n  transition: border-color 0.15s ease, background 0.15s ease, transform 0.1s ease;\r\n}\r\n.home-agent-take:hover {\r\n  border-color: var(--home-accent);\r\n  background: color-mix(in srgb, var(--home-accent) 12%, transparent);\r\n}\r\n.home-agent-take:active { transform: scale(0.95); }\r\n\r\n.home-agent-line {\r\n  overflow: hidden;\r\n  text-overflow: ellipsis;\r\n  white-space: nowrap;\r\n  min-width: 0;\r\n}\r\n\r\n.home-agent-toolbox {\r\n  display: flex;\r\n  gap: 6px;\r\n  align-items: baseline;\r\n}\r\n.home-agent-k {\r\n  color: var(--home-accent);\r\n  flex: none;\r\n}\r\n.home-agent-dim { color: var(--color-muted-foreground, #6b7387); }\r\n\r\n.home-agent-msg {\r\n  color: var(--color-muted-foreground, #8b93a7);\r\n  font-style: italic;\r\n  max-height: 42px;\r\n  white-space: normal;\r\n  overflow: hidden;\r\n  display: -webkit-box;\r\n  -webkit-line-clamp: 2;\r\n  -webkit-box-orient: vertical;\r\n}\r\n\r\n.home-agent-stats {\r\n  display: flex;\r\n  gap: 10px;\r\n  flex-wrap: wrap;\r\n  font-size: 10px;\r\n  color: var(--color-foreground, #d8dce6);\r\n  border-top: 1px solid var(--home-border);\r\n  padding-top: 5px;\r\n  margin-top: auto;\r\n}\r\n.home-agent-stats i {\r\n  font-style: normal;\r\n  color: var(--color-muted-foreground, #6b7387);\r\n  font-size: 9px;\r\n}\r\n\r\n.home-agent-history {\r\n  display: flex;\r\n  flex-wrap: wrap;\r\n  gap: 4px 10px;\r\n  max-height: 40px;\r\n  overflow: hidden;\r\n}\r\n.home-agent-hist {\r\n  font-size: 10px;\r\n  color: var(--color-muted-foreground, #8b93a7);\r\n  display: inline-flex;\r\n  gap: 4px;\r\n  align-items: center;\r\n}\r\n.home-agent-hist .ok { color: #2dd4bf; }\r\n.home-agent-hist .bad { color: var(--home-error); }\r\n.home-agent-hist i {\r\n  font-style: normal;\r\n  font-size: 9px;\r\n  color: var(--color-muted-foreground, #6b7387);\r\n}\r\n\r\n/* ── Agent theater (take-control fullscreen) ───────────────────────── */\r\n\r\n.home-theater {\r\n  position: fixed;\r\n  inset: 0;\r\n  z-index: 1000;\r\n  background: color-mix(in srgb, var(--ui-editor-surface-background, rgb(8 8 12 / 1)) 92%, #000);\r\n  backdrop-filter: blur(18px);\r\n  -webkit-backdrop-filter: blur(18px);\r\n  display: flex;\r\n  flex-direction: column;\r\n  padding: 18px 22px 22px;\r\n  gap: 14px;\r\n  overflow: auto;\r\n  font-family: var(--theme-font-mono, ui-monospace, monospace);\r\n  color: var(--color-foreground, #d8dce6);\r\n  animation: home-theater-in 0.22s ease;\r\n}\r\n@keyframes home-theater-in {\r\n  from { opacity: 0; transform: scale(0.985); }\r\n  to { opacity: 1; transform: scale(1); }\r\n}\r\n\r\n.home-theater-head {\r\n  display: flex;\r\n  align-items: center;\r\n  gap: 10px;\r\n  border-bottom: 1px solid var(--home-border);\r\n  padding-bottom: 10px;\r\n  flex: none;\r\n}\r\n\r\n.home-theater-title {\r\n  font-size: 13px;\r\n  letter-spacing: 0.14em;\r\n  color: var(--home-accent);\r\n}\r\n\r\n.home-theater-sub {\r\n  font-size: 10px;\r\n  color: var(--color-muted-foreground, #6b7387);\r\n  text-transform: uppercase;\r\n  letter-spacing: 0.06em;\r\n}\r\n\r\n.home-theater-release {\r\n  margin-left: auto;\r\n  background: transparent;\r\n  border: 1px solid var(--home-border);\r\n  color: var(--color-foreground, #d8dce6);\r\n  border-radius: 6px;\r\n  font-size: 11px;\r\n  font-family: inherit;\r\n  padding: 4px 12px;\r\n  cursor: pointer;\r\n  transition: border-color 0.15s ease, color 0.15s ease;\r\n}\r\n.home-theater-release:hover {\r\n  border-color: var(--home-error);\r\n  color: var(--home-error);\r\n}\r\n\r\n.home-theater-grid {\r\n  display: grid;\r\n  grid-template-columns: repeat(12, 1fr);\r\n  gap: 12px;\r\n  flex: 1;\r\n  min-height: 0;\r\n  align-content: start;\r\n}\r\n.home-theater-span-5 { grid-column: span 5; }\r\n.home-theater-span-7 { grid-column: span 7; }\r\n.home-theater-span-12 { grid-column: span 12; }\r\n@media (max-width: 900px) {\r\n  .home-theater-span-5, .home-theater-span-7, .home-theater-span-12 { grid-column: span 12; }\r\n}\r\n\r\n.home-theater-panel {\r\n  background: var(--home-surface);\r\n  border: 1px solid var(--home-border);\r\n  border-radius: 10px;\r\n  padding: 12px 14px;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 8px;\r\n  min-height: 160px;\r\n  max-height: 420px;\r\n  overflow: hidden;\r\n  box-shadow: 0 10px 30px rgb(0 0 0 / 0.35);\r\n}\r\n\r\n.home-theater-panel-title {\r\n  font-size: 10px;\r\n  letter-spacing: 0.12em;\r\n  color: var(--color-muted-foreground, #6b7387);\r\n  display: flex;\r\n  align-items: center;\r\n  gap: 7px;\r\n  flex: none;\r\n  text-transform: uppercase;\r\n}\r\n.home-theater-dim {\r\n  color: var(--color-muted-foreground, #6b7387);\r\n  font-size: 10px;\r\n  font-style: italic;\r\n}\r\n\r\n/* NOW panel */\r\n.home-theater-current-tool {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 3px;\r\n  background: color-mix(in srgb, var(--home-accent) 8%, transparent);\r\n  border: 1px solid var(--home-border);\r\n  border-radius: 8px;\r\n  padding: 8px 10px;\r\n  flex: none;\r\n}\r\n.home-theater-ct-name {\r\n  color: var(--home-accent);\r\n  font-size: 12px;\r\n}\r\n.home-theater-ct-args {\r\n  font-size: 10px;\r\n  color: var(--color-muted-foreground, #8b93a7);\r\n  overflow: hidden;\r\n  text-overflow: ellipsis;\r\n  white-space: nowrap;\r\n}\r\n\r\n.home-theater-stream {\r\n  font-size: 11px;\r\n  line-height: 1.55;\r\n  color: var(--color-foreground, #d8dce6);\r\n  background: color-mix(in srgb, var(--home-accent) 4%, transparent);\r\n  border-left: 2px solid var(--home-accent);\r\n  padding: 6px 10px;\r\n  border-radius: 0 6px 6px 0;\r\n  max-height: 110px;\r\n  overflow: auto;\r\n  flex: none;\r\n  white-space: pre-wrap;\r\n  word-break: break-word;\r\n}\r\n\r\n.home-theater-feed {\r\n  flex: 1;\r\n  min-height: 0;\r\n  overflow: auto;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 2px;\r\n  font-size: 10.5px;\r\n}\r\n.home-theater-feed-row {\r\n  display: flex;\r\n  gap: 8px;\r\n  align-items: baseline;\r\n  padding: 1px 0;\r\n  border-bottom: 1px solid color-mix(in srgb, var(--home-border) 40%, transparent);\r\n}\r\n.home-theater-feed-time {\r\n  color: var(--color-muted-foreground, #555d70);\r\n  flex: none;\r\n  font-size: 9.5px;\r\n}\r\n.home-theater-feed-kind { flex: none; width: 14px; text-align: center; }\r\n.home-theater-feed-kind.tool { color: var(--home-accent); }\r\n.home-theater-feed-kind.message { color: #2dd4bf; }\r\n.home-theater-feed-kind.subagent { color: #a78bfa; }\r\n.home-theater-feed-kind.system { color: var(--color-muted-foreground, #6b7387); }\r\n.home-theater-feed-kind.bad { color: var(--home-error); }\r\n.home-theater-feed-label {\r\n  color: var(--color-foreground, #d8dce6);\r\n  flex: none;\r\n}\r\n.home-theater-feed-detail {\r\n  color: var(--color-muted-foreground, #8b93a7);\r\n  overflow: hidden;\r\n  text-overflow: ellipsis;\r\n  white-space: nowrap;\r\n  min-width: 0;\r\n}\r\n\r\n.home-theater-foot {\r\n  display: flex;\r\n  gap: 14px;\r\n  font-size: 9.5px;\r\n  color: var(--color-muted-foreground, #555d70);\r\n  text-transform: uppercase;\r\n  letter-spacing: 0.06em;\r\n  flex: none;\r\n  border-top: 1px solid var(--home-border);\r\n  padding-top: 6px;\r\n}\r\n\r\n/* FUNCTION panel */\r\n.home-theater-fn-current {\r\n  background: color-mix(in srgb, var(--home-accent) 8%, transparent);\r\n  border: 1px solid var(--home-border);\r\n  border-radius: 8px;\r\n  padding: 8px 10px;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 6px;\r\n  flex: none;\r\n}\r\n.home-theater-fn-name {\r\n  display: flex;\r\n  align-items: center;\r\n  gap: 8px;\r\n  font-size: 12px;\r\n  color: var(--home-accent);\r\n}\r\n.home-theater-fn-spin { animation: home-theater-spin 1.4s linear infinite; }\r\n@keyframes home-theater-spin { to { transform: rotate(360deg); } }\r\n.home-theater-fn-state {\r\n  margin-left: auto;\r\n  font-size: 9px;\r\n  text-transform: uppercase;\r\n  letter-spacing: 0.08em;\r\n  padding: 1px 8px;\r\n  border-radius: 20px;\r\n  border: 1px solid;\r\n}\r\n.home-theater-fn-state.running {\r\n  color: var(--home-accent);\r\n  border-color: var(--home-accent);\r\n}\r\n.home-theater-fn-args {\r\n  font-size: 10px;\r\n  color: var(--color-muted-foreground, #8b93a7);\r\n  white-space: pre-wrap;\r\n  word-break: break-word;\r\n  max-height: 120px;\r\n  overflow: auto;\r\n  margin: 0;\r\n  font-family: inherit;\r\n}\r\n\r\n.home-theater-fn-history {\r\n  flex: 1;\r\n  min-height: 0;\r\n  overflow: auto;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 2px;\r\n  font-size: 10.5px;\r\n}\r\n.home-theater-fn-row {\r\n  display: flex;\r\n  gap: 8px;\r\n  align-items: baseline;\r\n  border-bottom: 1px solid color-mix(in srgb, var(--home-border) 40%, transparent);\r\n  padding: 2px 0;\r\n}\r\n.home-theater-fn-row .ok { color: #2dd4bf; flex: none; }\r\n.home-theater-fn-row .bad { color: var(--home-error); flex: none; }\r\n.home-theater-fn-hname { color: var(--color-foreground, #d8dce6); flex: none; }\r\n.home-theater-fn-hargs {\r\n  color: var(--color-muted-foreground, #8b93a7);\r\n  overflow: hidden;\r\n  text-overflow: ellipsis;\r\n  white-space: nowrap;\r\n  min-width: 0;\r\n}\r\n.home-theater-fn-hdur {\r\n  margin-left: auto;\r\n  color: var(--color-muted-foreground, #6b7387);\r\n  flex: none;\r\n  font-size: 9.5px;\r\n}\r\n\r\n/* TOKENS & COST panel */\r\n.home-theater-tok-grid {\r\n  display: grid;\r\n  grid-template-columns: repeat(2, 1fr);\r\n  gap: 8px;\r\n}\r\n.home-theater-tok-cell {\r\n  background: color-mix(in srgb, var(--home-accent) 5%, transparent);\r\n  border: 1px solid var(--home-border);\r\n  border-radius: 8px;\r\n  padding: 8px 10px;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 2px;\r\n}\r\n.home-theater-tok-num { font-size: 15px; color: var(--color-foreground, #d8dce6); }\r\n.home-theater-tok-num.home-theater-money { color: var(--home-accent); }\r\n.home-theater-tok-lbl {\r\n  font-size: 9px;\r\n  text-transform: uppercase;\r\n  letter-spacing: 0.07em;\r\n  color: var(--color-muted-foreground, #6b7387);\r\n}\r\n\r\n.home-theater-tok-models {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 3px;\r\n  font-size: 10px;\r\n  border-top: 1px solid var(--home-border);\r\n  padding-top: 6px;\r\n}\r\n.home-theater-tok-model {\r\n  display: flex;\r\n  gap: 10px;\r\n  align-items: baseline;\r\n}\r\n.home-theater-tok-mname { color: var(--color-foreground, #d8dce6); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }\r\n.home-theater-tok-mtok { color: var(--color-muted-foreground, #8b93a7); margin-left: auto; }\r\n.home-theater-tok-mcost { color: var(--home-accent); flex: none; }\r\n\r\n.home-theater-tok-session {\r\n  border-top: 1px solid var(--home-border);\r\n  padding-top: 6px;\r\n  font-size: 10px;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 2px;\r\n}\r\n.home-theater-tok-slbl {\r\n  font-size: 9px;\r\n  text-transform: uppercase;\r\n  letter-spacing: 0.07em;\r\n  color: var(--color-muted-foreground, #6b7387);\r\n}\r\n.home-theater-tok-snum { color: var(--color-muted-foreground, #8b93a7); }\r\n\r\n/* PROJECT panel */\r\n.home-theater-proj-session {\r\n  background: color-mix(in srgb, var(--home-accent) 5%, transparent);\r\n  border: 1px solid var(--home-border);\r\n  border-radius: 8px;\r\n  padding: 8px 10px;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 2px;\r\n}\r\n.home-theater-proj-title { font-size: 12px; color: var(--color-foreground, #d8dce6); }\r\n.home-theater-proj-meta {\r\n  font-size: 9.5px;\r\n  color: var(--color-muted-foreground, #6b7387);\r\n}\r\n\r\n.home-theater-proj-files {\r\n  flex: 1;\r\n  min-height: 0;\r\n  overflow: auto;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 2px;\r\n  font-size: 10.5px;\r\n}\r\n.home-theater-proj-file {\r\n  display: flex;\r\n  gap: 8px;\r\n  align-items: baseline;\r\n  border-bottom: 1px solid color-mix(in srgb, var(--home-border) 40%, transparent);\r\n  padding: 2px 0;\r\n}\r\n.home-theater-proj-glyph {\r\n  color: var(--home-accent);\r\n  flex: none;\r\n  font-size: 9px;\r\n  width: 16px;\r\n  text-align: center;\r\n}\r\n.home-theater-proj-path {\r\n  color: var(--color-muted-foreground, #8b93a7);\r\n  overflow: hidden;\r\n  text-overflow: ellipsis;\r\n  white-space: nowrap;\r\n}\r\n\r\n.home-theater-proj-subagents {\r\n  border-top: 1px solid var(--home-border);\r\n  padding-top: 6px;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 3px;\r\n  font-size: 10px;\r\n}\r\n.home-theater-proj-subagent { display: flex; gap: 8px; align-items: baseline; }\r\n.home-theater-proj-subagent .ok { color: var(--home-accent); }\r\n.home-theater-proj-subgoal {\r\n  color: var(--color-muted-foreground, #6b7387);\r\n  overflow: hidden;\r\n  text-overflow: ellipsis;\r\n  white-space: nowrap;\r\n}\r\n\r\n/* RECOMMENDATIONS panel */\r\n.home-theater-rec-list {\r\n  flex: 1;\r\n  min-height: 0;\r\n  overflow: auto;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 6px;\r\n}\r\n.home-theater-rec {\r\n  display: flex;\r\n  gap: 10px;\r\n  align-items: flex-start;\r\n  border: 1px solid var(--home-border);\r\n  border-radius: 8px;\r\n  padding: 7px 10px;\r\n  background: color-mix(in srgb, var(--home-surface) 60%, transparent);\r\n}\r\n.home-theater-rec.warn { border-color: color-mix(in srgb, #e8b33c 45%, transparent); }\r\n.home-theater-rec.crit { border-color: color-mix(in srgb, var(--home-error) 55%, transparent); }\r\n.home-theater-rec-tag {\r\n  flex: none;\r\n  width: 18px;\r\n  height: 18px;\r\n  border-radius: 50%;\r\n  display: grid;\r\n  place-items: center;\r\n  font-size: 10px;\r\n  margin-top: 1px;\r\n}\r\n.home-theater-rec.info .home-theater-rec-tag {\r\n  color: var(--home-accent);\r\n  border: 1px solid var(--home-accent);\r\n}\r\n.home-theater-rec.warn .home-theater-rec-tag {\r\n  color: #e8b33c;\r\n  border: 1px solid #e8b33c;\r\n}\r\n.home-theater-rec.crit .home-theater-rec-tag {\r\n  color: var(--home-error);\r\n  border: 1px solid var(--home-error);\r\n}\r\n.home-theater-rec-body { min-width: 0; }\r\n.home-theater-rec-title { font-size: 11px; color: var(--color-foreground, #d8dce6); }\r\n.home-theater-rec-detail {\r\n  font-size: 10px;\r\n  color: var(--color-muted-foreground, #8b93a7);\r\n  margin-top: 1px;\r\n}\r\n";
 const HOME_DESKTOP_PATH = "/home";
 const DESKTOP_START_KEY = "home-dashboard.opened-this-start";
 function createHomeContributions(render, navigate = () => void 0) {
@@ -2450,7 +3194,8 @@ function createDesktopHomeHost(ctx, desktop) {
       }
       return ctx.rest(path, options);
     },
-    navigateTo: (path) => desktop.navigate(desktopRoute(path))
+    navigateTo: (path) => desktop.navigate(desktopRoute(path)),
+    onEvent: (type, listener) => desktop.onEvent(type, listener)
   };
 }
 function DesktopHomePage() {

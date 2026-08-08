@@ -22,8 +22,17 @@ interface HermesPluginSDK {
   fetchJSON: <T = unknown>(url: string, init?: RequestInit) => Promise<T>;
 }
 
+export interface GatewayRpcEvent<T = unknown> {
+  type: string;
+  payload?: T;
+  session_id?: string;
+  profile?: string;
+}
+
 export interface HermesHomeHost extends HermesPluginSDK {
   navigateTo: (routePath: string) => void;
+  /** Live gateway events (desktop only). Absent on the web dashboard. */
+  onEvent?: (type: string, listener: (event: GatewayRpcEvent) => void) => () => void;
 }
 
 declare global {
@@ -73,4 +82,15 @@ export function fetchJSON<T = unknown>(url: string, init?: RequestInit): Promise
  *  widget click-through). */
 export function navigateTo(routePath: string): void {
   getHost().navigateTo(routePath);
+}
+
+/** Subscribe to live gateway events (desktop only). Returns null on the web
+ *  dashboard (no live channel) so callers can fall back to polling. */
+export function onGatewayEvent(
+  type: string,
+  listener: (event: GatewayRpcEvent) => void,
+): (() => void) | null {
+  const h = getHost();
+  if (!h.onEvent) return null;
+  return h.onEvent(type, listener);
 }

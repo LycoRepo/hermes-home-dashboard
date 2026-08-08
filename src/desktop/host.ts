@@ -1,4 +1,4 @@
-import type { HermesApi, HermesHomeHost } from "../sdk";
+import type { GatewayRpcEvent, HermesApi, HermesHomeHost } from "../sdk";
 
 interface DesktopPluginContext {
   rest<T>(path: string, options?: { method?: string; body?: unknown }): Promise<T>;
@@ -13,6 +13,7 @@ interface DesktopSdkHost {
     component?: string;
   }): Promise<unknown>;
   navigate(path: string): void;
+  onEvent(type: string, listener: (event: GatewayRpcEvent) => void): () => void;
 }
 
 const PLUGIN_API_PREFIX = "/api/plugins/home-dashboard";
@@ -65,5 +66,6 @@ export function createDesktopHomeHost(
       return ctx.rest<T>(path, options);
     },
     navigateTo: (path) => desktop.navigate(desktopRoute(path)),
+    onEvent: (type, listener) => desktop.onEvent(type, listener),
   };
 }

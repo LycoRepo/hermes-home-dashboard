@@ -3,6 +3,8 @@ import { fetchJSON } from "../sdk";
 import { GridCanvas, type GridCanvasHandle } from "./GridCanvas";
 import { WidgetCatalog } from "./WidgetCatalog";
 import { useHomeData } from "./useHomeData";
+import { AgentTheater } from "./widgets/agent/AgentTheater";
+import { subscribeTheater } from "./theater";
 import {
   DEFAULT_LAYOUT, parseLayout, type HomeLayout,
 } from "./layout-schema";
@@ -28,6 +30,7 @@ export default function HomePage() {
   const [editing, setEditing] = useState(false);
   const [showEdit, setShowEdit] = useState(false);
   const [overTrash, setOverTrash] = useState(false);
+  const [theaterOn, setTheaterOn] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   const rootRef = useRef<HTMLDivElement>(null);
   const catalogRef = useRef<HTMLDivElement>(null);
@@ -35,6 +38,14 @@ export default function HomePage() {
   const dirty = useRef(false);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const data = useHomeData();
+
+  // The agent widget can "take control" of the whole screen. While the
+  // theater is active the grid stays mounted underneath (state intact) and
+  // the fullscreen overlay sits on top; editing is force-closed.
+  useEffect(() => subscribeTheater(setTheaterOn), []);
+  useEffect(() => {
+    if (theaterOn && editing) setEditing(false);
+  }, [theaterOn, editing]);
 
   const showToast = useCallback((msg: string) => {
     setToast(msg);
@@ -168,6 +179,7 @@ export default function HomePage() {
         </button>
       </div>
       {toast && <div className="home-toast" role="status">{toast}</div>}
+      {theaterOn && <AgentTheater data={data} />}
     </div>
   );
 }
