@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { access, lstat, mkdir, realpath, rename, symlink } from "node:fs/promises";
+import { access, copyFile, lstat, mkdir, realpath, rename, symlink } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -40,7 +40,7 @@ export async function installDesktopPlugin({
     const stamp = new Date().toISOString().replaceAll(":", "-").replaceAll(".", "-");
     // Backups live OUTSIDE desktop-plugins/ — the desktop app scans that
     // directory for plugin folders and a stale backup (same plugin id) can
-    // win the scan over the live link, silently serving the old plugin.
+    // win the scan over the live plugin, silently serving the old build.
     const backupRoot = path.join(hermesHome, "backups", "desktop-plugins");
     await mkdir(backupRoot, { recursive: true });
     backup = path.join(backupRoot, `${PLUGIN_ID}.backup-${stamp}`);
@@ -49,7 +49,15 @@ export async function installDesktopPlugin({
     if (error?.code !== "ENOENT") throw error;
   }
 
-  await symlink(source, destination, platform === "win32" ? "junction" : "dir");
+  if (platform === "win32") {
+    // Windows junction quirk: the desktop plugin scanner filters entries by
+    // `e.isDirectory`, and Node reports junctions as symlinks — a junctioned
+    // plugin folder is invisible to the app. Install a real folder instead.
+    await mkdir(destination, { recursive: true });
+    await copyFile(path.join(source, "plugin.js"), path.join(destination, "plugin.js"));
+  } else {
+    await symlink(source, destination, "dir");
+  }
 
   return { status: "linked", source, destination, backup };
 }
