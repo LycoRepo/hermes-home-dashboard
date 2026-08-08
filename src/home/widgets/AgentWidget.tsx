@@ -1,6 +1,7 @@
 import { enterTheater } from "../theater";
 import type { HomeData } from "../useHomeData";
 import { useAgentLive } from "./agent/agentLive";
+import { LiveScene, useScene } from "./agent/LiveScene";
 
 interface Props {
   data: HomeData;
@@ -21,16 +22,12 @@ function fmtTok(n: number | undefined): string {
   return String(n);
 }
 
-function truncate(s: string, max: number): string {
-  return s.length <= max ? s : `${s.slice(0, max)}…`;
-}
-
-/** The agent eye — a compact live view of what the AI is doing, with the
- *  "take control" button that opens the fullscreen AgentTheater. */
+/** The agent eye — compact live view with the animated scene and the
+ *  take-control button. No emoji: pure type + CSS. */
 export function AgentWidget({ data, editing }: Props) {
   const live = useAgentLive();
-  const analytics = data.analytics;
-  const totals = analytics?.totals;
+  const scene = useScene(live);
+  const totals = data.analytics?.totals;
 
   const statusLabel = live.busy
     ? live.currentTool ? "working" : "thinking"
@@ -41,9 +38,6 @@ export function AgentWidget({ data, editing }: Props) {
       <div className="home-agent-head">
         <span className={`home-agent-dot ${live.busy ? "busy" : ""}`} aria-hidden="true" />
         <span className="home-agent-status">{statusLabel}</span>
-        {live.currentTool && (
-          <span className="home-agent-tool">⚡{live.currentTool.name}</span>
-        )}
         {!editing && (
           <button
             className="home-agent-take"
@@ -51,51 +45,28 @@ export function AgentWidget({ data, editing }: Props) {
             title="Take control of the screen — live agent theater"
             aria-label="Take control"
           >
-            🎬 take control
+            <span className="home-agent-take-ico" aria-hidden="true" />
+            take control
           </button>
         )}
       </div>
 
-      {live.currentTool && (
-        <div className="home-agent-line home-agent-toolbox">
-          <span className="home-agent-k">{live.currentTool.name}</span>
-          <span className="home-agent-dim">
-            {truncate(
-              (() => {
-                if (live.currentTool.args === undefined) return "…";
-                if (typeof live.currentTool.args === "string") return live.currentTool.args;
-                try { return JSON.stringify(live.currentTool.args); } catch { return "…"; }
-              })(),
-              180,
-            )}
-          </span>
-        </div>
-      )}
-
-      {(live.streamText || live.lastMessage) && (
-        <div className="home-agent-line home-agent-msg">
-          {truncate(live.streamText || live.lastMessage || "", 240)}
-        </div>
-      )}
-
-      {live.subagents.length > 0 && (
-        <div className="home-agent-line home-agent-dim">
-          ⛏ {live.subagents.filter((a) => a.status === "running").length} subagent(s) working
-        </div>
-      )}
+      <div className="home-agent-scene">
+        <LiveScene scene={scene} />
+      </div>
 
       <div className="home-agent-stats">
         <span title="Input tokens today">
-          ▲{fmtTok(totals?.total_input)} <i>in</i>
+          <i>in</i> {fmtTok(totals?.total_input)}
         </span>
         <span title="Output tokens today">
-          ▼{fmtTok(totals?.total_output)} <i>out</i>
+          <i>out</i> {fmtTok(totals?.total_output)}
         </span>
         <span title="Estimated cost today">
-          {fmtCost(totals?.total_estimated_cost)} <i>est</i>
+          <i>est</i> {fmtCost(totals?.total_estimated_cost)}
         </span>
         <span title="Sessions today">
-          {totals?.total_sessions ?? "—"} <i>ses</i>
+          <i>ses</i> {totals?.total_sessions ?? "—"}
         </span>
       </div>
 
@@ -103,9 +74,10 @@ export function AgentWidget({ data, editing }: Props) {
         <div className="home-agent-history">
           {live.toolHistory.slice(0, 4).map((t, i) => (
             <span key={`${t.name}-${t.startedAt}-${i}`} className="home-agent-hist">
-              <span className={t.status === "complete" ? "ok" : "bad"}>
-                {t.status === "complete" ? "✓" : "✗"}
-              </span>
+              <span
+                className={`home-agent-hist-dot ${t.status === "complete" ? "ok" : "bad"}`}
+                aria-hidden="true"
+              />
               {t.name}
               {t.duration !== undefined && <i>{t.duration.toFixed(0)}s</i>}
             </span>
@@ -113,9 +85,7 @@ export function AgentWidget({ data, editing }: Props) {
         </div>
       )}
 
-      {!live.live && (
-        <div className="home-agent-dim">polling mode · no live channel</div>
-      )}
+      {!live.live && <div className="home-agent-dim">polling mode · no live channel</div>}
     </div>
   );
 }

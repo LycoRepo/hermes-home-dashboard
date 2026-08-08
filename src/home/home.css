@@ -914,12 +914,23 @@
   font-size: 11px;
 }
 
+/* The animated scene owns the middle space and centers its content
+ * vertically; head/stats/history are fixed and never overflow. */
+.home-agent-scene {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  overflow: hidden;
+}
+
 .home-agent-head {
   display: flex;
   align-items: center;
   gap: 6px;
   flex-wrap: wrap;
   min-height: 18px;
+  flex: none;
 }
 
 .home-agent-dot {
@@ -947,15 +958,6 @@
   color: var(--color-foreground, #d8dce6);
 }
 
-.home-agent-tool {
-  color: var(--home-accent);
-  font-size: 10px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  max-width: 40%;
-}
-
 .home-agent-take {
   margin-left: auto;
   background: transparent;
@@ -966,6 +968,9 @@
   font-family: inherit;
   padding: 2px 8px;
   cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   transition: border-color 0.15s ease, background 0.15s ease, transform 0.1s ease;
 }
 .home-agent-take:hover {
@@ -973,6 +978,15 @@
   background: color-mix(in srgb, var(--home-accent) 12%, transparent);
 }
 .home-agent-take:active { transform: scale(0.95); }
+
+/* Play triangle, pure CSS — no emoji. */
+.home-agent-take-ico {
+  width: 0;
+  height: 0;
+  border-left: 5px solid var(--home-accent);
+  border-top: 3.5px solid transparent;
+  border-bottom: 3.5px solid transparent;
+}
 
 .home-agent-line {
   overflow: hidden;
@@ -1011,7 +1025,14 @@
   color: var(--color-foreground, #d8dce6);
   border-top: 1px solid var(--home-border);
   padding-top: 5px;
-  margin-top: auto;
+  flex: none;
+  min-width: 0;
+}
+.home-agent-stats span {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
 }
 .home-agent-stats i {
   font-style: normal;
@@ -1025,6 +1046,7 @@
   gap: 4px 10px;
   max-height: 40px;
   overflow: hidden;
+  flex: none;
 }
 .home-agent-hist {
   font-size: 10px;
@@ -1033,8 +1055,14 @@
   gap: 4px;
   align-items: center;
 }
-.home-agent-hist .ok { color: #2dd4bf; }
-.home-agent-hist .bad { color: var(--home-error); }
+.home-agent-hist-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  flex: none;
+}
+.home-agent-hist-dot.ok { background: #2dd4bf; }
+.home-agent-hist-dot.bad { background: var(--home-error); }
 .home-agent-hist i {
   font-style: normal;
   font-size: 9px;
@@ -1201,18 +1229,26 @@
   align-items: baseline;
   padding: 1px 0;
   border-bottom: 1px solid color-mix(in srgb, var(--home-border) 40%, transparent);
+  animation: home-feed-in 0.32s ease-out both;
 }
 .home-theater-feed-time {
   color: var(--color-muted-foreground, #555d70);
   flex: none;
   font-size: 9.5px;
 }
-.home-theater-feed-kind { flex: none; width: 14px; text-align: center; }
-.home-theater-feed-kind.tool { color: var(--home-accent); }
-.home-theater-feed-kind.message { color: #2dd4bf; }
-.home-theater-feed-kind.subagent { color: #a78bfa; }
-.home-theater-feed-kind.system { color: var(--color-muted-foreground, #6b7387); }
-.home-theater-feed-kind.bad { color: var(--home-error); }
+/* Kind dot, pure CSS — no emoji. */
+.home-theater-feed-kind {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  align-self: center;
+}
+.home-theater-feed-kind.tool { background: var(--home-accent); }
+.home-theater-feed-kind.message { background: #2dd4bf; }
+.home-theater-feed-kind.subagent { background: #a78bfa; }
+.home-theater-feed-kind.system { background: var(--color-muted-foreground, #6b7387); }
+.home-theater-feed-kind.bad { background: var(--home-error); }
 .home-theater-feed-label {
   color: var(--color-foreground, #d8dce6);
   flex: none;
@@ -1255,8 +1291,18 @@
   font-size: 12px;
   color: var(--home-accent);
 }
-.home-theater-fn-spin { animation: home-theater-spin 1.4s linear infinite; }
-@keyframes home-theater-spin { to { transform: rotate(360deg); } }
+.home-theater-fn-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex: none;
+}
+.home-theater-fn-dot.running {
+  background: var(--home-accent);
+  animation: home-agent-pulse 1.2s ease-in-out infinite;
+}
+.home-theater-fn-dot.ok { background: #2dd4bf; }
+.home-theater-fn-dot.bad { background: var(--home-error); }
 .home-theater-fn-state {
   margin-left: auto;
   font-size: 9px;
@@ -1297,8 +1343,6 @@
   border-bottom: 1px solid color-mix(in srgb, var(--home-border) 40%, transparent);
   padding: 2px 0;
 }
-.home-theater-fn-row .ok { color: #2dd4bf; flex: none; }
-.home-theater-fn-row .bad { color: var(--home-error); flex: none; }
 .home-theater-fn-hname { color: var(--color-foreground, #d8dce6); flex: none; }
 .home-theater-fn-hargs {
   color: var(--color-muted-foreground, #8b93a7);
@@ -1328,8 +1372,16 @@
   display: flex;
   flex-direction: column;
   gap: 2px;
+  min-width: 0;
+  overflow: hidden;
 }
-.home-theater-tok-num { font-size: 15px; color: var(--color-foreground, #d8dce6); }
+.home-theater-tok-num {
+  font-size: 15px;
+  color: var(--color-foreground, #d8dce6);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .home-theater-tok-num.home-theater-money { color: var(--home-accent); }
 .home-theater-tok-lbl {
   font-size: 9px;
@@ -1362,6 +1414,7 @@
   display: flex;
   flex-direction: column;
   gap: 2px;
+  min-width: 0;
 }
 .home-theater-tok-slbl {
   font-size: 9px;
@@ -1369,7 +1422,17 @@
   letter-spacing: 0.07em;
   color: var(--color-muted-foreground, #6b7387);
 }
-.home-theater-tok-snum { color: var(--color-muted-foreground, #8b93a7); }
+.home-theater-tok-stitle {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.home-theater-tok-snum {
+  color: var(--color-muted-foreground, #8b93a7);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 
 /* PROJECT panel */
 .home-theater-proj-session {
@@ -1426,7 +1489,16 @@
   font-size: 10px;
 }
 .home-theater-proj-subagent { display: flex; gap: 8px; align-items: baseline; }
-.home-theater-proj-subagent .ok { color: var(--home-accent); }
+.home-theater-proj-subdot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex: none;
+  align-self: center;
+}
+.home-theater-proj-subdot.run { background: var(--home-accent); animation: home-agent-pulse 1.2s ease-in-out infinite; }
+.home-theater-proj-subdot.done { background: #2dd4bf; }
+.home-theater-proj-subname { color: var(--color-foreground, #d8dce6); }
 .home-theater-proj-subgoal {
   color: var(--color-muted-foreground, #6b7387);
   overflow: hidden;
@@ -1482,4 +1554,164 @@
   font-size: 10px;
   color: var(--color-muted-foreground, #8b93a7);
   margin-top: 1px;
+}
+
+/* ── Live scene — the animated centerpiece ────────────────────────────
+ * On identity change: the outgoing content slides up while fading, the
+ * incoming content rises from below with a blur that dissolves as it
+ * settles. */
+
+.home-theater-scene {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  overflow: hidden;
+}
+
+.home-scene {
+  position: relative;
+  width: 100%;
+}
+
+.home-scene-item {
+  animation: home-scene-in 0.42s ease-out both;
+}
+
+.home-scene-item.leaving {
+  position: absolute;
+  inset-inline: 0;
+  top: 0;
+  animation: home-scene-out 0.4s ease-in forwards;
+  pointer-events: none;
+}
+
+@keyframes home-scene-in {
+  from {
+    opacity: 0;
+    transform: translateY(26px);
+    filter: blur(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+    filter: blur(0);
+  }
+}
+
+@keyframes home-scene-out {
+  from {
+    opacity: 1;
+    transform: translateY(0);
+    filter: blur(0);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(-26px);
+    filter: blur(4px);
+  }
+}
+
+@keyframes home-feed-in {
+  from { opacity: 0; transform: translateY(7px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes home-caret-blink {
+  0%, 45% { opacity: 1; }
+  50%, 100% { opacity: 0; }
+}
+
+/* Scene content — tool call */
+.home-scene-tool {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+.home-scene-title {
+  color: var(--home-accent);
+  font-size: 12px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.home-scene-meta {
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--color-muted-foreground, #6b7387);
+}
+.home-scene-args {
+  margin: 0;
+  font-family: inherit;
+  font-size: 10px;
+  color: var(--color-muted-foreground, #8b93a7);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 90px;
+  overflow: auto;
+}
+
+/* Scene content — message */
+.home-scene-msg {
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--color-foreground, #d8dce6);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 150px;
+  overflow: auto;
+}
+.home-scene-caret {
+  display: inline-block;
+  width: 6px;
+  height: 13px;
+  margin-left: 2px;
+  vertical-align: -2px;
+  background: var(--home-accent);
+  animation: home-caret-blink 1s steps(1) infinite;
+}
+
+/* Scene content — idle */
+.home-scene-idle {
+  font-size: 10px;
+  font-style: italic;
+  color: var(--color-muted-foreground, #6b7387);
+}
+
+/* Compact scene (widget body) */
+.home-agent-scene .home-scene {
+  display: flex;
+}
+.home-agent-scene .home-scene-item {
+  min-width: 0;
+  flex: 1;
+}
+.home-agent-scene .home-scene-msg {
+  font-size: 10.5px;
+  max-height: 64px;
+  -webkit-line-clamp: 3;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  white-space: normal;
+}
+.home-agent-scene .home-scene-tool {
+  gap: 2px;
+}
+.home-agent-scene .home-scene-title {
+  font-size: 11px;
+}
+.home-agent-scene .home-scene-args {
+  font-size: 10px;
+  max-height: 36px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  overflow: hidden;
+}
+.home-agent-scene .home-scene-meta,
+.home-agent-scene .home-scene-idle {
+  font-size: 9.5px;
 }

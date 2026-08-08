@@ -3,6 +3,7 @@ import { exitTheater } from "../../theater";
 import type { HomeData } from "../../useHomeData";
 import { buildRecommendations, type Recommendation } from "./coach";
 import { argPreview, useAgentLive, type LiveToolCall } from "./agentLive";
+import { LiveScene, useScene } from "./LiveScene";
 
 interface Props {
   data: HomeData;
@@ -48,7 +49,6 @@ function extractPaths(tools: LiveToolCall[]): string[] {
       if (typeof v === "string" && v.length > 1) paths.add(v);
     }
     if (typeof a.command === "string") {
-      // terminal commands often name files: extract quoted paths
       const m = a.command.match(/["']([^"']+\.[a-zA-Z0-9_]+)["']/g);
       if (m) m.forEach((s) => paths.add(s.slice(1, -1)));
     }
@@ -73,9 +73,10 @@ function PanelTitle({ children }: { children: React.ReactNode }) {
   return <b className="home-theater-panel-title">{children}</b>;
 }
 
-// ── AHORA: the live feed ──────────────────────────────────────────────
+// ── AHORA: animated scene + live process feed ─────────────────────────
 
 function NowPanel({ data, live }: { data: HomeData; live: ReturnType<typeof useAgentLive> }) {
+  const scene = useScene(live);
   const [now, setNow] = useState(Date.now());
   useEffect(() => {
     const t = setInterval(() => setNow(Date.now()), 1000);
@@ -94,18 +95,9 @@ function NowPanel({ data, live }: { data: HomeData; live: ReturnType<typeof useA
         {live.activeTitle && <span className="home-theater-sub">— {live.activeTitle}</span>}
       </PanelTitle>
 
-      {live.currentTool && (
-        <div className="home-theater-current-tool">
-          <span className="home-theater-ct-name">⚡ {live.currentTool.name}</span>
-          <span className="home-theater-ct-args">
-            {argPreview(live.currentTool.args, 400) ?? "…"}
-          </span>
-        </div>
-      )}
-
-      {live.streamText && (
-        <div className="home-theater-stream">{live.streamText}</div>
-      )}
+      <div className="home-theater-scene">
+        <LiveScene scene={scene} />
+      </div>
 
       <div className="home-theater-feed">
         {live.feed.length === 0 && (
@@ -114,9 +106,10 @@ function NowPanel({ data, live }: { data: HomeData; live: ReturnType<typeof useA
         {live.feed.slice(0, 40).map((e) => (
           <div key={e.id} className="home-theater-feed-row">
             <span className="home-theater-feed-time">{hhmm(e.at)}</span>
-            <span className={`home-theater-feed-kind ${e.kind}${e.ok === false ? " bad" : ""}`}>
-              {e.ok === false ? "✗" : e.kind === "tool" ? "⚡" : e.kind === "message" ? "▸" : e.kind === "subagent" ? "⛏" : "·"}
-            </span>
+            <span
+              className={`home-theater-feed-kind ${e.kind}${e.ok === false ? " bad" : ""}`}
+              aria-hidden="true"
+            />
             <span className="home-theater-feed-label">{e.label}</span>
             {e.detail && <span className="home-theater-feed-detail">{e.detail}</span>}
           </div>
@@ -126,7 +119,7 @@ function NowPanel({ data, live }: { data: HomeData; live: ReturnType<typeof useA
       <div className="home-theater-foot">
         <span>last event {live.lastEventAt ? timeAgo(live.lastEventAt) : "—"}</span>
         <span>{live.live ? "live" : "polling"}</span>
-        <span>{now ? timeAgo(now) : ""}</span>
+        <span>updated {timeAgo(now)}</span>
       </div>
     </section>
   );
@@ -142,7 +135,7 @@ function ToolPanel({ live }: { live: ReturnType<typeof useAgentLive> }) {
       {live.currentTool ? (
         <div className="home-theater-fn-current">
           <div className="home-theater-fn-name">
-            <span className="home-theater-fn-spin" aria-hidden="true">⏳</span>
+            <span className="home-theater-fn-dot running" aria-hidden="true" />
             {live.currentTool.name}
             <span className="home-theater-fn-state running">running</span>
           </div>
@@ -158,9 +151,10 @@ function ToolPanel({ live }: { live: ReturnType<typeof useAgentLive> }) {
         <div className="home-theater-fn-history">
           {live.toolHistory.slice(0, 8).map((t, i) => (
             <div key={`${t.name}-${t.startedAt}-${i}`} className="home-theater-fn-row">
-              <span className={t.status === "complete" ? "ok" : "bad"}>
-                {t.status === "complete" ? "✓" : "✗"}
-              </span>
+              <span
+                className={`home-theater-fn-dot ${t.status === "complete" ? "ok" : "bad"}`}
+                aria-hidden="true"
+              />
               <span className="home-theater-fn-hname">{t.name}</span>
               <span className="home-theater-fn-hargs">{argPreview(t.args, 90)}</span>
               {t.duration !== undefined && (
@@ -187,15 +181,15 @@ function TokenPanel({ data }: { data: HomeData }) {
 
       <div className="home-theater-tok-grid">
         <div className="home-theater-tok-cell">
-          <span className="home-theater-tok-num">▲ {fmtTok(totals?.total_input)}</span>
+          <span className="home-theater-tok-num">{fmtTok(totals?.total_input)}</span>
           <span className="home-theater-tok-lbl">input today</span>
         </div>
         <div className="home-theater-tok-cell">
-          <span className="home-theater-tok-num">▼ {fmtTok(totals?.total_output)}</span>
+          <span className="home-theater-tok-num">{fmtTok(totals?.total_output)}</span>
           <span className="home-theater-tok-lbl">output today</span>
         </div>
         <div className="home-theater-tok-cell">
-          <span className="home-theater-tok-num">⧉ {fmtTok(totals?.total_cache_read)}</span>
+          <span className="home-theater-tok-num">{fmtTok(totals?.total_cache_read)}</span>
           <span className="home-theater-tok-lbl">cache read</span>
         </div>
         <div className="home-theater-tok-cell">
@@ -221,7 +215,7 @@ function TokenPanel({ data }: { data: HomeData }) {
       {active && (
         <div className="home-theater-tok-session">
           <span className="home-theater-tok-slbl">active session</span>
-          <span>{active.title ?? active.id}</span>
+          <span className="home-theater-tok-stitle">{active.title ?? active.id}</span>
           <span className="home-theater-tok-snum">
             {fmtTok((active.input_tokens ?? 0) + (active.output_tokens ?? 0))} tok ·{" "}
             {active.message_count ?? 0} msg · {active.tool_call_count ?? 0} tools
@@ -275,10 +269,11 @@ function ProjectPanel({ data, live }: { data: HomeData; live: ReturnType<typeof 
         <div className="home-theater-proj-subagents">
           {live.subagents.map((a) => (
             <div key={a.name} className="home-theater-proj-subagent">
-              <span className={a.status === "running" ? "ok" : "dim"}>
-                {a.status === "running" ? "⛏" : "✓"}
-              </span>
-              {a.name}
+              <span
+                className={`home-theater-proj-subdot ${a.status === "running" ? "run" : "done"}`}
+                aria-hidden="true"
+              />
+              <span className="home-theater-proj-subname">{a.name}</span>
               {a.goal && <span className="home-theater-proj-subgoal">— {a.goal}</span>}
             </div>
           ))}
@@ -341,7 +336,7 @@ export function AgentTheater({ data }: Props) {
           onClick={() => exitTheater()}
           title="Release control (Esc)"
         >
-          ✕ release control
+          release control
         </button>
       </header>
 
