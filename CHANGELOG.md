@@ -20,6 +20,19 @@ clone, they never build).
 
 ---
 
+## 1.4.0 — 2026-09-27
+
+- **Fix: plugin loads again on current Hermes.** Hermes removed the
+  `hermes_cli.web_server.*` compatibility re-exports on 2026-09-14, so the
+  backend (`plugin_api.py`) was refused at load and the Home layout/data
+  routes stopped working. The Desktop data adapters now import from the
+  defining modules under `hermes_cli.web_routers` (`status`, `analytics`,
+  `cron`, `sessions`); analytics range clamp aligned to the host's 1–365 days.
+- **Agent widget** with take-control theater mode, animated live scene,
+  markdown scene and tool-first priority.
+- **Install (Windows):** the Desktop plugin is copied instead of junctioned,
+  and backups live outside `desktop-plugins/`.
+
 ## 1.3.0 — 2026-08-03
 
 - **Host: live graphs view.** Third view in the hover cycle

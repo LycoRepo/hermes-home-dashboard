@@ -94,21 +94,21 @@ async def set_layout(body: "LayoutBody") -> Dict[str, Any]:
 # ``ctx.rest`` boundary while preserving the richer Home widgets.
 @router.get("/system")
 async def get_desktop_system() -> Dict[str, Any]:
-    from hermes_cli.web_server import get_system_stats
+    from hermes_cli.web_routers.status import get_system_stats
 
     return await get_system_stats()
 
 
 @router.get("/analytics")
 async def get_desktop_analytics(days: int = 30, profile: str | None = None) -> Dict[str, Any]:
-    from hermes_cli.web_server import get_usage_analytics
+    from hermes_cli.web_routers.analytics import get_usage_analytics
 
-    return await get_usage_analytics(days=max(1, min(366, days)), profile=profile)
+    return await get_usage_analytics(days=max(1, min(365, days)), profile=profile)
 
 
 @router.get("/cron")
 async def get_desktop_cron(profile: str = "all") -> list[Dict[str, Any]]:
-    from hermes_cli.web_server import list_cron_jobs
+    from hermes_cli.web_routers.cron import list_cron_jobs
 
     return await list_cron_jobs(profile=profile or "all")
 
@@ -119,7 +119,7 @@ async def get_desktop_sessions(
     offset: int = 0,
     profile: str | None = None,
 ) -> Dict[str, Any]:
-    from hermes_cli.web_server import get_sessions
+    from hermes_cli.web_routers.sessions import get_sessions
 
     return await asyncio.to_thread(
         get_sessions,

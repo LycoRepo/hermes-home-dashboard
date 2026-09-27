@@ -20,14 +20,14 @@ class DesktopDataApiTest(unittest.IsolatedAsyncioTestCase):
         def sessions(**kwargs):
             return {"sessions": [], **kwargs}
 
-        fake = types.SimpleNamespace(
-            get_system_stats=system,
-            get_usage_analytics=analytics,
-            list_cron_jobs=cron,
-            get_sessions=sessions,
-        )
+        fakes = {
+            "hermes_cli.web_routers.status": types.SimpleNamespace(get_system_stats=system),
+            "hermes_cli.web_routers.analytics": types.SimpleNamespace(get_usage_analytics=analytics),
+            "hermes_cli.web_routers.cron": types.SimpleNamespace(list_cron_jobs=cron),
+            "hermes_cli.web_routers.sessions": types.SimpleNamespace(get_sessions=sessions),
+        }
 
-        with patch.dict(sys.modules, {"hermes_cli.web_server": fake}):
+        with patch.dict(sys.modules, fakes):
             self.assertEqual(await plugin_api.get_desktop_system(), {"hostname": "personal-computer"})
             self.assertEqual(
                 await plugin_api.get_desktop_analytics(days=7, profile="default"),
