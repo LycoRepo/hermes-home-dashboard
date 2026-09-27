@@ -20,6 +20,14 @@ clone, they never build).
 
 ---
 
+## 1.4.1 — 2026-09-27
+
+- **Fix: HUD mode no longer breaks.** The "open Home once per start" hook
+  also ran inside Desktop's auxiliary windows (HUD, pop-out session, pop-out
+  browser), each of which has its own `sessionStorage`. In the HUD it
+  navigated to `/home`, replacing the chat with a clipped Home page and
+  dropping the session route. Windows carrying `?win=` are now left alone.
+
 ## 1.4.0 — 2026-09-27
 
 - **Fix: plugin loads again on current Hermes.** Hermes removed the

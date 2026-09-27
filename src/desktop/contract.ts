@@ -51,10 +51,26 @@ export function createHomeContributions(
   ];
 }
 
+/** Desktop marks every auxiliary renderer (HUD, pop-out session, pop-out
+ *  browser) with `?win=` before the hash. Those windows render a single
+ *  surface, not the app shell, so they must never be sent to /home. */
+export function isAuxiliaryDesktopWindow(search: string): boolean {
+  try {
+    return new URLSearchParams(search).has("win");
+  } catch {
+    return false;
+  }
+}
+
 export function openHomeOnDesktopStart(
   storage: SessionStorageLike,
   navigate: (path: string) => void,
+  search = "",
 ): boolean {
+  if (isAuxiliaryDesktopWindow(search)) {
+    return false;
+  }
+
   if (storage.getItem(DESKTOP_START_KEY) === "1") {
     return false;
   }

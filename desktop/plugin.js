@@ -3320,7 +3320,17 @@ function createHomeContributions(render, navigate = () => void 0) {
     }
   ];
 }
-function openHomeOnDesktopStart(storage, navigate) {
+function isAuxiliaryDesktopWindow(search) {
+  try {
+    return new URLSearchParams(search).has("win");
+  } catch {
+    return false;
+  }
+}
+function openHomeOnDesktopStart(storage, navigate, search = "") {
+  if (isAuxiliaryDesktopWindow(search)) {
+    return false;
+  }
   if (storage.getItem(DESKTOP_START_KEY) === "1") {
     return false;
   }
@@ -3392,7 +3402,11 @@ const plugin = {
       )
     );
     window.setTimeout(() => {
-      openHomeOnDesktopStart(window.sessionStorage, (path) => host.navigate(path));
+      openHomeOnDesktopStart(
+        window.sessionStorage,
+        (path) => host.navigate(path),
+        window.location.search
+      );
     }, 0);
   }
 };

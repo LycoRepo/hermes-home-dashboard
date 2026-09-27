@@ -38,7 +38,11 @@ const plugin: HermesPlugin = {
     // Runtime plugins arrive just after the shell mounts.  Defer one task so
     // the contributed /home route exists before making it the startup page.
     window.setTimeout(() => {
-      openHomeOnDesktopStart(window.sessionStorage, (path) => host.navigate(path));
+      openHomeOnDesktopStart(
+        window.sessionStorage,
+        (path) => host.navigate(path),
+        window.location.search,
+      );
     }, 0);
   },
 };
