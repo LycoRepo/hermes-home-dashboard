@@ -9,6 +9,7 @@ import {
 import type { HomeLayout } from "./layout-schema";
 import { WIDGET_REGISTRY } from "./widgets/registry";
 import { WidgetShell } from "./WidgetShell";
+import { widgetState } from "./widget-state";
 import type { HomeData } from "./useHomeData";
 
 const CELL_H = 44;
@@ -307,7 +308,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, Props>(function GridCanva
             dragging={isDragged}
             swapTarget={isTwinTarget}
             trashing={isDragged && drag?.overTrash}
-            error={def.dataSource !== null && data.errors.has(def.dataSource)}
+            state={widgetState(def.dataSource, data)}
             onRemove={() => onRemove(item.id)}
             onHeaderPointerDown={(e) => startDrag(item, "move", e)}
             onResizePointerDown={(e) => startDrag(item, "resize", e)}

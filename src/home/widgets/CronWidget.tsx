@@ -38,7 +38,7 @@ export function CronWidget({ cron }: { cron: CronJob[] | null }) {
         {slice.map((j) => (
           <div className="row" key={j.id}>
             <span className="dim">{nextRunLabel(j)}</span>
-            <span>{(j.name ?? j.id).slice(0, 16)}</span>
+            <span className="row-name" title={j.name ?? j.id}>{j.name ?? j.id}</span>
             <span className={j.last_error ? "werr" : "ok"}>
               {j.last_error ? "err" : "ok"}
             </span>

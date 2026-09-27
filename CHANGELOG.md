@@ -20,6 +20,24 @@ clone, they never build).
 
 ---
 
+## 1.5.0 — 2026-09-27
+
+Polish pass, verified in a live Hermes Desktop.
+
+- **Logs:** Windows hosts return CRLF lines, which the parser read as one fake
+  `INFO` record holding the raw tail (the "INFO … INFO" line). Lines are now
+  split correctly, the `[session]` tag no longer hides the component, rows show
+  `HH:MM:SS`, and the list scrolls inside the widget with a soft bottom fade
+  instead of spilling past the edge.
+- **Widget states:** the single `● no data` is replaced by `offline` (backend
+  unreachable), `unavailable` (one source failing) and a `stale` header tag
+  that keeps the last good data on screen during a failed poll.
+- **Agent:** the stats row no longer overflows 8px below the widget.
+- **Matrix:** the canvas is sized to whole glyph rows — no half-cut bottom row.
+- **Sessions / Cron:** names ellipsize at the real column width with the full
+  name on hover, instead of a fixed character cut ("bitacoras-guayab").
+- **Contrast:** widget headers and the Hermes version caption are readable.
+
 ## 1.4.1 — 2026-09-27
 
 - **Fix: HUD mode no longer breaks.** The "open Home once per start" hook

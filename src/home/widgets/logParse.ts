@@ -8,7 +8,9 @@
 export const FILES = ["agent", "errors", "gateway"] as const;
 export type FileKey = (typeof FILES)[number];
 
-const HEAD_RE = /^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2}),\d+\s+(\w+)\S*\s*(.*)$/;
+// <date> <time>,<ms> <LEVEL> [<session>]? <rest> — the session tag is optional
+// and must not count toward the "<component>: " split below.
+const HEAD_RE = /^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2}),\d+\s+(\w+)(?:\s*\[[^\]]*\])?\s*(.*)$/;
 
 export const SHORT: Record<string, string> = {
   ERROR: "ERR", CRITICAL: "CRIT", FATAL: "FATAL",
@@ -34,12 +36,15 @@ export function levelClass(level: string): string {
  *  single multi-line error (e.g. a stack trace) counted as many. */
 export function parseRecords(lines: string[]): LogRecord[] {
   const out: LogRecord[] = [];
-  for (const raw of lines) {
+  for (const line of lines) {
+    // Windows hosts hand back CRLF lines; a trailing CR defeats HEAD_RE's `$`,
+    // which used to glue the whole tail into one fake INFO record.
+    const raw = line.replace(/[\r\n]+$/, "");
     const m = HEAD_RE.exec(raw);
     if (m) {
       const rest = m[4];
       const ci = rest.indexOf(": ");
-      const hasComp = ci > 0 && ci < 40;
+      const hasComp = ci > 0 && ci < 60 && !/\s/.test(rest.slice(0, ci));
       out.push({
         level: m[3].toUpperCase(),
         time: m[2],

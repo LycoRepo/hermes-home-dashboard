@@ -1,4 +1,10 @@
 import type { CSSProperties, ReactNode } from "react";
+import type { WidgetState } from "./widget-state";
+
+const STATE_COPY: Partial<Record<WidgetState, string>> = {
+  offline: "offline · Hermes backend unreachable",
+  unavailable: "unavailable · this source is not responding",
+};
 
 interface Props {
   title: string;
@@ -9,8 +15,8 @@ interface Props {
   swapTarget?: boolean;
   /** Pointer is over the trash zone — dropping will delete this widget. */
   trashing?: boolean;
-  /** Data source failed — render a compact error state instead of children. */
-  error?: boolean;
+  /** Data-source health; offline/unavailable replace the body, stale keeps it. */
+  state?: WidgetState;
   onRemove?: () => void;
   onHeaderPointerDown?: (e: React.PointerEvent) => void;
   onResizePointerDown?: (e: React.PointerEvent) => void;
@@ -20,7 +26,7 @@ interface Props {
 }
 
 export function WidgetShell({
-  title, style, editing, dragging, swapTarget, trashing, error,
+  title, style, editing, dragging, swapTarget, trashing, state = "ok",
   onRemove, onHeaderPointerDown, onResizePointerDown, onClickThrough, children,
 }: Props) {
   const cls = [
@@ -38,8 +44,11 @@ export function WidgetShell({
     >
       <b className="hd" onPointerDown={editing ? onHeaderPointerDown : undefined}>
         {title}
+        {state === "stale" && <span className="hd-stale" title="Last update failed — showing previous data"> · stale</span>}
       </b>
-      {error ? <span className="werr">● no data</span> : children}
+      {STATE_COPY[state] ? (
+        <span className={`wstate wstate-${state}`}>{STATE_COPY[state]}</span>
+      ) : children}
       {editing && onRemove && (
         <button className="wremove" onClick={onRemove} aria-label={`Remove ${title}`}>
           ×

@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
 import { HoverArrows } from "./HoverArrows";
+import { matrixRows } from "./matrixGeometry";
 
 const GLYPHS = "アイウエオカキクケコサシスセソタチツテトナニヌネノ01☿";
 const COL_W = 13;
@@ -35,9 +36,14 @@ export function MatrixWidget({ widgetProps, onWidgetPropsChange }: Props) {
     let accent = "#d4af37";
 
     const fit = () => {
-      const r = cv.getBoundingClientRect();
-      cv.width = Math.max(10, r.width);
-      cv.height = Math.max(10, r.height);
+      // Measure the slot (widget minus header), not the canvas, so shrinking the
+      // canvas to whole rows never feeds back into the next measurement.
+      const slot = cv.parentElement!.getBoundingClientRect();
+      const avail = slot.height - cv.offsetTop - 6;
+      const { paintHeight } = matrixRows(avail, ROW_H);
+      cv.width = Math.max(10, Math.floor(slot.width));
+      cv.height = Math.max(ROW_H, paintHeight);
+      cv.style.height = `${cv.height}px`;
       accent =
         getComputedStyle(cv).getPropertyValue("--home-accent").trim() || accent;
       drops = Array.from(
@@ -47,7 +53,7 @@ export function MatrixWidget({ widgetProps, onWidgetPropsChange }: Props) {
     };
     fit();
     const ro = new ResizeObserver(fit);
-    ro.observe(cv);
+    ro.observe(cv.parentElement!);
 
     const t = setInterval(() => {
       if (document.hidden) return;

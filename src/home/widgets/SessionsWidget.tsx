@@ -31,8 +31,8 @@ export function SessionsWidget({
       <div className="rows">
         {slice.map((s) => (
           <div className="row" key={s.id}>
-            <span className="dim">
-              {(s.title ?? s.source ?? s.id).slice(0, 18)}
+            <span className="dim row-name" title={s.title ?? s.source ?? s.id}>
+              {s.title ?? s.source ?? s.id}
             </span>
             <span className={s.is_active ? "ok" : "dim"}>
               {s.is_active ? "live" : "idle"}

@@ -6,6 +6,8 @@
 .home-root {
   --home-accent: var(--color-primary, var(--ui-accent, #ffd700));
   --home-accent-dim: color-mix(in srgb, var(--home-accent) 55%, #000);
+  /* Readable secondary text (headers, captions): dim was ~3:1 on the glass. */
+  --home-accent-soft: color-mix(in srgb, var(--home-accent) 82%, #9aa3b5);
   --home-surface: color-mix(
     in srgb,
     var(--home-accent) 6%,
@@ -87,12 +89,12 @@
 
 .home-widget .hd {
   display: block;
-  font-size: 9px;
+  font-size: 9.5px;
   letter-spacing: 0.18em;
   margin-bottom: 6px;
   font-weight: 700;
   text-transform: uppercase;
-  color: var(--home-accent-dim);
+  color: var(--home-accent-soft);
   white-space: nowrap;
   overflow: hidden;
 }
@@ -126,6 +128,12 @@
   padding: 2px 4px;
 }
 .home-widget .werr { color: var(--home-error); }
+/* Data-source states (widget-state.ts): honest copy per failure kind. */
+.home-widget .wstate { display: block; font-size: 10px; letter-spacing: 0.04em; }
+.home-widget .wstate::before { content: "● "; }
+.home-widget .wstate-offline { color: var(--home-error); }
+.home-widget .wstate-unavailable { color: #f5b945; }
+.home-widget .hd .hd-stale { color: #f5b945; letter-spacing: 0.1em; opacity: 0.8; }
 
 /* ── hover controls (contextual chrome, rest mode only) ──
  * Reusable floating control rendered inside a widget body. Hidden by default,
@@ -245,6 +253,16 @@
   break-inside: avoid;
 }
 .home-widget .row:last-child { border-bottom: none; }
+/* Names flex and ellipsize at the real column width instead of a fixed
+ * character slice that cut words mid-glyph ("bitacoras-guayab"). */
+.home-widget .row > * { flex: none; }
+.home-widget .row > .row-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
 
 .home-widget .meters { column-gap: 18px; }
 @container (min-width: 380px) {
@@ -340,7 +358,7 @@
 }
 .home-ascii-ver {
   text-align: center;
-  color: var(--home-accent-dim);
+  color: var(--home-accent-soft);
   font-size: max(8px, min(2.6cqw, 5cqh));
   letter-spacing: 0.22em;
   margin-top: 1.5cqh;
@@ -471,13 +489,25 @@
   letter-spacing: 0.06em;
   color: var(--home-accent);
 }
+/* The wrapper owns the widget's remaining height so the list scrolls inside it
+ * instead of growing past the bottom edge (the old calc() resolved against an
+ * auto-height parent and never clamped). */
+.home-logs-wrap {
+  display: flex;
+  flex-direction: column;
+  height: calc(100% - 21px);
+  min-height: 0;
+}
 .home-logs {
   display: flex;
   flex-direction: column;
   gap: 1px;
-  height: calc(100% - 40px);
+  flex: 1 1 0;
+  min-height: 0;
   overflow-y: auto;
   margin-top: 3px;
+  /* Rows that don't fit fade out instead of being sliced by the edge. */
+  mask-image: linear-gradient(180deg, #000 calc(100% - 14px), transparent);
 }
 .log-row {
   display: flex;
@@ -498,6 +528,12 @@
 .log-lvl.lvl-error { color: var(--home-error); }
 .log-lvl.lvl-warn { color: #f5b945; }
 .log-lvl.lvl-info { color: var(--color-muted-foreground, #6b7387); }
+.log-time {
+  flex: none;
+  font-size: 9px;
+  color: var(--color-muted-foreground, #6b7387);
+  font-variant-numeric: tabular-nums;
+}
 .log-msg {
   flex: 1;
   min-width: 0;
@@ -908,7 +944,9 @@
   display: flex;
   flex-direction: column;
   gap: 6px;
-  height: 100%;
+  /* The .hd header sits above in the same content box (same as the other
+   * widgets' calc) — 100% pushed the stats row 8px past the bottom edge. */
+  height: calc(100% - 21px);
   min-height: 0;
   overflow: hidden;
   font-size: 11px;

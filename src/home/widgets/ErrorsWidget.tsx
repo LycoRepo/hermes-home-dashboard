@@ -55,11 +55,11 @@ export function ErrorsWidget({ logs, widgetProps, onWidgetPropsChange }: Props) 
 
   const records = [...all].reverse(); // newest first
   return (
-    <div>
+    <div className="home-logs-wrap">
       {arrows}
       <div className="logs-sub">
         <span className="logs-file">{fileKey.toUpperCase()}</span>
-        <span className="dim">{records.length} rec</span>
+        <span className="dim">{records.length} {records.length === 1 ? "record" : "records"}</span>
       </div>
       <div className="home-logs">
         {records.length === 0 ? (
@@ -68,6 +68,7 @@ export function ErrorsWidget({ logs, widgetProps, onWidgetPropsChange }: Props) 
           records.map((r, i) => (
             <div className="log-row" key={`${r.time}-${i}`} title={r.text}>
               <span className={`log-lvl ${levelClass(r.level)}`}>{SHORT[r.level] ?? r.level.slice(0, 4)}</span>
+              {r.time && <span className="log-time">{r.time}</span>}
               <span className="log-msg">{r.message}</span>
             </div>
           ))
