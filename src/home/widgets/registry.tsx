@@ -83,8 +83,13 @@ export const WIDGET_REGISTRY: Record<string, WidgetDef> = {
   },
   sessions: {
     title: "sessions",
-    component: ({ data }) => (
-      <SessionsWidget status={data.status} sessions={data.sessions} />
+    component: ({ data, widgetProps, onWidgetPropsChange }) => (
+      <SessionsWidget
+        status={data.status}
+        sessions={data.sessions}
+        widgetProps={widgetProps}
+        onWidgetPropsChange={onWidgetPropsChange}
+      />
     ),
     defaultSize: { gw: 3, gh: 3 }, minSize: { gw: 2, gh: 2 },
     navigateTo: "/sessions", dataSource: "sessions",

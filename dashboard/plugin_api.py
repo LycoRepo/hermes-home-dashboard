@@ -106,6 +106,13 @@ async def get_desktop_analytics(days: int = 30, profile: str | None = None) -> D
     return await get_usage_analytics(days=max(1, min(365, days)), profile=profile)
 
 
+@router.get("/analytics/models")
+async def get_desktop_models_analytics(days: int = 30, profile: str | None = None) -> Dict[str, Any]:
+    from hermes_cli.web_routers.analytics import get_models_analytics
+
+    return await get_models_analytics(days=max(1, min(365, days)), profile=profile)
+
+
 @router.get("/cron")
 async def get_desktop_cron(profile: str = "all") -> list[Dict[str, Any]]:
     from hermes_cli.web_routers.cron import list_cron_jobs

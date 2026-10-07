@@ -126,10 +126,10 @@ they never fight drag/resize.
 | **Clock** | toggle 12/24h and seconds |
 | **Calendar** | page months · 3 responsive sizes |
 | **Moon** | scrub the phase ±1 day |
-| **Tokens** | switch range (7 days / 1 month / 6 months) · line ↔ bars chart · show/hide totals · hover a point for an animated tooltip |
+| **Tokens** | switch range (7 days / 1 month / 6 months) · line ↔ bars chart · show/hide totals · group the range by day / model / provider (each bucket shows tokens and estimated cost; grouping counts every API call under the model active at that moment and folds in background usage — `含后台辅助` — so buckets sum to more than, and distribute differently from, the day view's per-session totals) · hover a point for an animated tooltip |
 | **Host** | cycle meters ↔ numeric detail ↔ live graphs (four rolling one-minute sparklines: cpu, ram, load, proc) |
 | **Gateway** | hover expands read-only detail (pid, health, config) |
-| **Sessions** | paginate recent sessions |
+| **Sessions** | paginate sessions (3 per page) · sort recent ↔ by token use (every row shows its tokens) |
 | **Cron** | paginate upcoming jobs |
 | **Logs** | switch log file: agent / errors / gateway (multi-line records grouped, level-colored) |
 | **Notes** | quick to-dos · clear completed |

@@ -135,6 +135,47 @@ export interface AnalyticsResponse {
   };
 }
 
+/** A model's capability metadata as returned by the core models.dev lookup
+ *  (`agent/models_dev.py`). Optional fields are `null` when models.dev does not
+ *  know them — they are required keys of the object, not absent ones. */
+export interface ModelCapabilities {
+  supports_tools: boolean;
+  supports_vision: boolean | null;
+  supports_reasoning: boolean | null;
+  context_window: number;
+  max_output_tokens: number | null;
+  model_family: string;
+}
+
+/** One (model, provider) row of the core models analytics — the source the
+ *  Tokens widget groups by. Rows fold in background/auxiliary usage, so they
+ *  add up to more than the day view's totals. */
+export interface ModelsAnalyticsEntry {
+  model: string;
+  provider: string;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  reasoning_tokens: number;
+  estimated_cost: number;
+  actual_cost: number;
+  sessions: number;
+  api_calls: number;
+  tool_calls: number;
+  last_used_at: number | null;
+  avg_tokens_per_session: number;
+  /** models.dev metadata for this model, or `{}` when unknown / the lookup
+   *  fails (core `web_routers/analytics.py::_model_capabilities`). No consumer
+   *  reads it yet; kept for the shape contract. */
+  capabilities?: Partial<ModelCapabilities>;
+}
+
+export interface ModelsAnalyticsResponse {
+  models: ModelsAnalyticsEntry[];
+  totals: AnalyticsResponse["totals"] & { distinct_models?: number };
+  period_days: number;
+}
+
 export interface LogsResponse {
   file: string;
   lines: string[];

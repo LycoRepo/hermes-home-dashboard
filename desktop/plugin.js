@@ -21,6 +21,7 @@ const api = {
   getStatus: () => getHost().api.getStatus(),
   getSystemStats: () => getHost().api.getSystemStats(),
   getAnalytics: (days) => getHost().api.getAnalytics(days),
+  getModelsAnalytics: (days) => getHost().api.getModelsAnalytics(days),
   getCronJobs: (profile) => getHost().api.getCronJobs(profile),
   getSessions: (limit, offset) => getHost().api.getSessions(limit, offset),
   getLogs: (params) => getHost().api.getLogs(params)
@@ -102,7 +103,8 @@ function HoverArrows({
   onLabelClick,
   prevDisabled,
   nextDisabled,
-  className
+  className,
+  children
 }) {
   return /* @__PURE__ */ jsxs(HoverCtl, { className: `hover-arrows${className ? ` ${className}` : ""}`, children: [
     /* @__PURE__ */ jsx(
@@ -141,7 +143,8 @@ function HoverArrows({
         },
         children: "›"
       }
-    )
+    ),
+    children
   ] });
 }
 function readNotes(p) {
@@ -415,40 +418,109 @@ function GatewayWidget({ status }) {
     ] }) })
   ] });
 }
+function formatTokenCount(n) {
+  if (n >= 1e6) return `${(n / 1e6).toFixed(n % 1e6 === 0 ? 0 : 1)}M`;
+  if (n >= 1e3) return `${(n / 1e3).toFixed(n % 1e3 === 0 ? 0 : 1)}K`;
+  return String(n);
+}
+function groupMode(raw) {
+  return raw === "model" || raw === "provider" ? raw : "day";
+}
+function needsModels(mode) {
+  return mode !== "day";
+}
+const UNLABELED = "未标注";
+const PROVIDER_ALIASES = {
+  "alibaba-cn": "Alibaba",
+  alibaba: "Alibaba",
+  "bailian-others": "Alibaba",
+  "dashscope-others": "Alibaba"
+};
+function normalize(raw) {
+  return (raw ?? "").trim().toLowerCase();
+}
+function providerLabel(raw) {
+  const key = normalize(raw);
+  if (!key) return UNLABELED;
+  return PROVIDER_ALIASES[key] ?? (raw ?? "").trim();
+}
+function groupBuckets(rows, mode) {
+  const buckets = /* @__PURE__ */ new Map();
+  for (const row2 of rows) {
+    const label = mode === "provider" ? providerLabel(row2.provider) : normalize(row2.model) ? String(row2.model).trim() : UNLABELED;
+    const key = normalize(label);
+    const cur = buckets.get(key) ?? { key, label, tokens: 0, cost: 0 };
+    cur.tokens += (row2.input_tokens ?? 0) + (row2.output_tokens ?? 0);
+    cur.cost += row2.estimated_cost ?? 0;
+    buckets.set(key, cur);
+  }
+  return [...buckets.values()].sort(
+    (a, b) => b.tokens - a.tokens || (a.label < b.label ? -1 : a.label > b.label ? 1 : 0)
+  );
+}
+const MAX_BUCKETS = 6;
+function topBuckets(buckets, max) {
+  const limit = Math.max(0, Math.trunc(max));
+  if (buckets.length <= limit) return { top: buckets, hidden: 0 };
+  return { top: buckets.slice(0, limit), hidden: buckets.length - limit };
+}
+function sessionSort(raw) {
+  return raw === "tokens" ? "tokens" : "recent";
+}
+function sortSessions(list, mode) {
+  if (mode !== "tokens") return list;
+  const io = (s) => (s.input_tokens ?? 0) + (s.output_tokens ?? 0);
+  return [...list].sort((a, b) => io(b) - io(a));
+}
 const PER_PAGE$1 = 3;
+const SORTS = ["recent", "tokens"];
 function SessionsWidget({
   status,
-  sessions
+  sessions,
+  widgetProps,
+  onWidgetPropsChange
 }) {
   const [page, setPage] = useState(0);
   if (!status && !sessions) return /* @__PURE__ */ jsx("span", { className: "dim", children: "loading…" });
-  const all = sessions?.sessions ?? [];
+  const sort = sessionSort(widgetProps.sort);
+  const setProp = (patch) => onWidgetPropsChange({ ...widgetProps, ...patch });
+  const all = sortSessions(sessions?.sessions ?? [], sort);
   const pages = Math.max(1, Math.ceil(all.length / PER_PAGE$1));
   const p = Math.min(page, pages - 1);
   const slice = all.slice(p * PER_PAGE$1, p * PER_PAGE$1 + PER_PAGE$1);
+  const sortCtl = SORTS.map((s) => /* @__PURE__ */ jsx(
+    "button",
+    {
+      className: `hv-opt${sort === s ? " on" : ""}`,
+      onClick: () => setProp({ sort: s }),
+      title: s === "recent" ? "backend order (recent)" : "most tokens first",
+      children: s
+    },
+    s
+  ));
   return /* @__PURE__ */ jsxs("div", { children: [
-    pages > 1 && /* @__PURE__ */ jsx(
+    pages > 1 ? /* @__PURE__ */ jsxs(
       HoverArrows,
       {
         onPrev: () => setPage(Math.max(0, p - 1)),
         onNext: () => setPage(Math.min(pages - 1, p + 1)),
         label: `${p + 1}/${pages}`,
         prevDisabled: p <= 0,
-        nextDisabled: p >= pages - 1
+        nextDisabled: p >= pages - 1,
+        children: [
+          /* @__PURE__ */ jsx("span", { className: "tok-div" }),
+          sortCtl
+        ]
       }
-    ),
+    ) : /* @__PURE__ */ jsx(HoverCtl, { className: "hover-arrows", children: sortCtl }),
     /* @__PURE__ */ jsx("span", { className: "bigval", children: status?.active_sessions ?? "—" }),
     /* @__PURE__ */ jsx("span", { className: "dim", children: " active" }),
     /* @__PURE__ */ jsx("div", { className: "rows", children: slice.map((s) => /* @__PURE__ */ jsxs("div", { className: "row", children: [
       /* @__PURE__ */ jsx("span", { className: "dim row-name", title: s.title ?? s.source ?? s.id, children: s.title ?? s.source ?? s.id }),
+      /* @__PURE__ */ jsx("span", { className: "dim num", children: formatTokenCount(s.input_tokens + s.output_tokens) }),
       /* @__PURE__ */ jsx("span", { className: s.is_active ? "ok" : "dim", children: s.is_active ? "live" : "idle" })
     ] }, s.id)) })
   ] });
-}
-function formatTokenCount(n) {
-  if (n >= 1e6) return `${(n / 1e6).toFixed(n % 1e6 === 0 ? 0 : 1)}M`;
-  if (n >= 1e3) return `${(n / 1e3).toFixed(n % 1e3 === 0 ? 0 : 1)}K`;
-  return String(n);
 }
 function parseDay(day) {
   const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(day);
@@ -476,6 +548,8 @@ function toBars(daily, byMonth) {
   }
   return [...months.values()].sort((a, b) => a.sort - b.sort).map(({ sort, ...b }) => b);
 }
+const MODELS_CACHE_MS = 6e4;
+const GROUPS = ["day", "model", "provider"];
 const RANGES = [
   { key: "week", label: "7 days", days: 7, byMonth: false },
   { key: "month", label: "1 month", days: 30, byMonth: false },
@@ -488,6 +562,7 @@ function TokensWidget({ analytics, widgetProps, onWidgetPropsChange }) {
   const idx = RANGES.findIndex((r) => r.key === rangeKey);
   const chart = widgetProps.chart === "bars" ? "bars" : "line";
   const statsOn = widgetProps.stats !== false;
+  const group = groupMode(widgetProps.group);
   const [gid] = useState(() => `tok-grad-${gradSeq$1++}`);
   const [fetched, setFetched] = useState(null);
   const [failed, setFailed] = useState(false);
@@ -506,37 +581,128 @@ function TokensWidget({ analytics, widgetProps, onWidgetPropsChange }) {
       cancelled = true;
     };
   }, [range.days]);
+  const cacheRef = useRef(/* @__PURE__ */ new Map());
+  const [models, setModels] = useState(null);
+  useEffect(() => {
+    if (!needsModels(group)) return;
+    let cancelled = false;
+    const cached = cacheRef.current.get(range.days);
+    if (cached && Date.now() - cached.at < MODELS_CACHE_MS) {
+      setModels({ days: range.days, data: cached.data, stale: false, failed: false });
+      return;
+    }
+    api.getModelsAnalytics(range.days).then((r) => {
+      if (cancelled) return;
+      cacheRef.current.set(range.days, { data: r, at: Date.now() });
+      setModels({ days: range.days, data: r, stale: false, failed: false });
+    }).catch(() => {
+      if (cancelled) return;
+      setModels((prev) => {
+        const data = (prev && prev.days === range.days ? prev.data : null) ?? cacheRef.current.get(range.days)?.data ?? null;
+        return { days: range.days, data, stale: data !== null, failed: true };
+      });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [group, range.days]);
   const setProp = (patch) => onWidgetPropsChange({ ...widgetProps, ...patch });
   const cycle = (dir) => setProp({ range: RANGES[(idx + dir + RANGES.length) % RANGES.length].key });
-  const controls = /* @__PURE__ */ jsxs(HoverCtl, { className: "tok-ctl", children: [
-    /* @__PURE__ */ jsx("button", { className: "hv-arrow", "aria-label": "previous", onClick: () => cycle(-1), children: "‹" }),
-    /* @__PURE__ */ jsx("span", { className: "hv-label", children: range.label }),
-    /* @__PURE__ */ jsx("button", { className: "hv-arrow", "aria-label": "next", onClick: () => cycle(1), children: "›" }),
-    /* @__PURE__ */ jsx("span", { className: "tok-div" }),
-    /* @__PURE__ */ jsx(
+  const controls = /* @__PURE__ */ jsxs(HoverCtl, { className: "tok-ctl tok-set", children: [
+    /* @__PURE__ */ jsxs("div", { className: "tok-line", children: [
+      /* @__PURE__ */ jsx("button", { className: "hv-arrow", "aria-label": "previous", onClick: () => cycle(-1), children: "‹" }),
+      /* @__PURE__ */ jsx("span", { className: "hv-label", children: range.label }),
+      /* @__PURE__ */ jsx("button", { className: "hv-arrow", "aria-label": "next", onClick: () => cycle(1), children: "›" }),
+      /* @__PURE__ */ jsx("span", { className: "tok-div" }),
+      /* @__PURE__ */ jsx(
+        "button",
+        {
+          className: `hv-opt${chart === "line" ? " on" : ""}`,
+          onClick: () => setProp({ chart: chart === "line" ? "bars" : "line" }),
+          title: "line / bars view",
+          children: "line"
+        }
+      ),
+      /* @__PURE__ */ jsx(
+        "button",
+        {
+          className: `hv-opt${statsOn ? " on" : ""}`,
+          onClick: () => setProp({ stats: !statsOn }),
+          title: "show / hide totals",
+          children: "totals"
+        }
+      )
+    ] }),
+    /* @__PURE__ */ jsx("div", { className: "tok-grp", children: GROUPS.map((g) => /* @__PURE__ */ jsx(
       "button",
       {
-        className: `hv-opt${chart === "line" ? " on" : ""}`,
-        onClick: () => setProp({ chart: chart === "line" ? "bars" : "line" }),
-        title: "line / bars view",
-        children: "line"
-      }
-    ),
-    /* @__PURE__ */ jsx(
-      "button",
-      {
-        className: `hv-opt${statsOn ? " on" : ""}`,
-        onClick: () => setProp({ stats: !statsOn }),
-        title: "show / hide totals",
-        children: "totals"
-      }
-    )
+        className: `hv-opt${group === g ? " on" : ""}`,
+        onClick: () => setProp({ group: g }),
+        title: g === "day" ? "per-day chart" : `group this range by ${g}`,
+        children: g
+      },
+      g
+    )) })
   ] });
   const view = fetched ?? (failed ? analytics : null);
   const bars = useMemo(
     () => toBars(view?.daily ?? [], range.byMonth),
     [view, range.byMonth]
   );
+  const grouped = group === "day" ? null : group;
+  if (grouped) {
+    const mv = models && models.days === range.days ? models : null;
+    const mdata = mv?.data ?? null;
+    const buckets = mdata ? groupBuckets(mdata.models, grouped) : [];
+    const { top, hidden } = topBuckets(buckets, MAX_BUCKETS);
+    return /* @__PURE__ */ jsxs("div", { children: [
+      controls,
+      !mdata ? /* @__PURE__ */ jsx("span", { className: "dim", children: mv?.failed ? "unavailable" : "loading…" }) : buckets.length === 0 ? /* @__PURE__ */ jsx("span", { className: "dim", children: "no usage in this range" }) : /* @__PURE__ */ jsxs(Fragment, { children: [
+        /* @__PURE__ */ jsx("span", { className: "bigval", children: formatTokenCount(top[0].tokens) }),
+        /* @__PURE__ */ jsxs("span", { className: "dim", children: [
+          " by ",
+          group,
+          " · ",
+          range.label,
+          mv?.stale ? " · stale" : ""
+        ] }),
+        /* @__PURE__ */ jsx("span", { className: "tok-note dim", children: "含后台辅助" }),
+        /* @__PURE__ */ jsx("div", { className: "rows", children: top.map((b) => /* @__PURE__ */ jsxs("div", { className: "row", children: [
+          /* @__PURE__ */ jsx("span", { className: "dim row-name", title: b.label, children: b.label }),
+          /* @__PURE__ */ jsx("span", { className: "dim num", children: formatTokenCount(b.tokens) }),
+          /* @__PURE__ */ jsxs("span", { className: "ok", children: [
+            "$",
+            b.cost.toFixed(2)
+          ] })
+        ] }, b.key)) }),
+        hidden > 0 && /* @__PURE__ */ jsxs("span", { className: "dim tok-more", children: [
+          "+",
+          hidden,
+          " more"
+        ] }),
+        statsOn && /* @__PURE__ */ jsxs("div", { className: "tok-stats", children: [
+          /* @__PURE__ */ jsxs("span", { children: [
+            /* @__PURE__ */ jsx("span", { className: "dim", children: "in" }),
+            " ",
+            formatTokenCount(mdata.totals.total_input)
+          ] }),
+          /* @__PURE__ */ jsxs("span", { children: [
+            /* @__PURE__ */ jsx("span", { className: "dim", children: "out" }),
+            " ",
+            formatTokenCount(mdata.totals.total_output)
+          ] }),
+          /* @__PURE__ */ jsxs("span", { children: [
+            /* @__PURE__ */ jsx("span", { className: "dim", children: "cost" }),
+            " ",
+            /* @__PURE__ */ jsxs("span", { className: "ok", children: [
+              "$",
+              mdata.totals.total_estimated_cost.toFixed(2)
+            ] })
+          ] })
+        ] })
+      ] })
+    ] });
+  }
   if (!view) {
     return /* @__PURE__ */ jsxs("div", { children: [
       controls,
@@ -2206,7 +2372,15 @@ const WIDGET_REGISTRY = {
   },
   sessions: {
     title: "sessions",
-    component: ({ data }) => /* @__PURE__ */ jsx(SessionsWidget, { status: data.status, sessions: data.sessions }),
+    component: ({ data, widgetProps, onWidgetPropsChange }) => /* @__PURE__ */ jsx(
+      SessionsWidget,
+      {
+        status: data.status,
+        sessions: data.sessions,
+        widgetProps,
+        onWidgetPropsChange
+      }
+    ),
     defaultSize: { gw: 3, gh: 3 },
     minSize: { gw: 2, gh: 2 },
     navigateTo: "/sessions",
@@ -2694,7 +2868,7 @@ const SOURCES = {
   system: () => api.getSystemStats(),
   analytics: () => api.getAnalytics(1),
   cron: () => api.getCronJobs(),
-  sessions: () => api.getSessions(9),
+  sessions: () => api.getSessions(20),
   logs: () => api.getLogs({ lines: 50, level: "ERROR" })
 };
 function useHomeData() {
@@ -3578,6 +3752,8 @@ const homeCss = `/* Home page — rice-style widget grid.\r
   white-space: nowrap;\r
   text-overflow: ellipsis;\r
 }\r
+/* Numeric column (token counts) keeps equal-width digits. */\r
+.home-widget .row .num { font-variant-numeric: tabular-nums; }\r
 \r
 .home-widget .meters { column-gap: 18px; }\r
 @container (min-width: 380px) {\r
@@ -4010,6 +4186,19 @@ const homeCss = `/* Home page — rice-style widget grid.\r
 }\r
 /* Hover steppers for the pomodoro work/break lengths. */\r
 .hover-ctl.pomo-set { flex-direction: column; align-items: flex-end; gap: 1px; }\r
+/* Tokens control: two stacked lines (range/chart/totals, then the grouping).\r
+ * Same corner, so they share one floating control instead of overlapping. */\r
+.hover-ctl.tok-set { flex-direction: column; align-items: flex-end; gap: 1px; }\r
+.tok-line { display: flex; align-items: center; gap: 4px; }\r
+.tok-grp { display: flex; align-items: center; gap: 4px; }\r
+/* Explains that the grouped buckets include background/auxiliary usage, so\r
+ * they add up to more than the day view's total. Grouped views only. */\r
+.tok-note { display: block; font-size: 9px; letter-spacing: 0.06em; }\r
+/* "+N more" for buckets beyond the top six. Own block line after the rows\r
+ * container (it must not join the column flow, and inside it the span would\r
+ * steal the :last-child that clears the last row's border-bottom). Same voice\r
+ * as .tok-note. */\r
+.tok-more { display: block; font-size: 9px; letter-spacing: 0.06em; }\r
 .pomo-stepper { display: flex; align-items: center; gap: 3px; }\r
 .pomo-stepper .hv-label:nth-child(3) { min-width: 16px; text-align: center; color: var(--home-accent); }\r
 \r
@@ -5202,6 +5391,7 @@ function createDesktopHomeHost(ctx, desktop) {
     getStatus: () => desktop.status(),
     getSystemStats: () => ctx.rest("/system"),
     getAnalytics: (days) => ctx.rest(query("/analytics", { days })),
+    getModelsAnalytics: (days) => ctx.rest(query("/analytics/models", { days })),
     getCronJobs: (profile) => ctx.rest(query("/cron", { profile })),
     getSessions: (limit, offset) => ctx.rest(query("/sessions", { limit, offset })),
     getLogs: (params) => desktop.logs(params)

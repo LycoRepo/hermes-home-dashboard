@@ -263,6 +263,8 @@
   white-space: nowrap;
   text-overflow: ellipsis;
 }
+/* Numeric column (token counts) keeps equal-width digits. */
+.home-widget .row .num { font-variant-numeric: tabular-nums; }
 
 .home-widget .meters { column-gap: 18px; }
 @container (min-width: 380px) {
@@ -695,6 +697,19 @@
 }
 /* Hover steppers for the pomodoro work/break lengths. */
 .hover-ctl.pomo-set { flex-direction: column; align-items: flex-end; gap: 1px; }
+/* Tokens control: two stacked lines (range/chart/totals, then the grouping).
+ * Same corner, so they share one floating control instead of overlapping. */
+.hover-ctl.tok-set { flex-direction: column; align-items: flex-end; gap: 1px; }
+.tok-line { display: flex; align-items: center; gap: 4px; }
+.tok-grp { display: flex; align-items: center; gap: 4px; }
+/* Explains that the grouped buckets include background/auxiliary usage, so
+ * they add up to more than the day view's total. Grouped views only. */
+.tok-note { display: block; font-size: 9px; letter-spacing: 0.06em; }
+/* "+N more" for buckets beyond the top six. Own block line after the rows
+ * container (it must not join the column flow, and inside it the span would
+ * steal the :last-child that clears the last row's border-bottom). Same voice
+ * as .tok-note. */
+.tok-more { display: block; font-size: 9px; letter-spacing: 0.06em; }
 .pomo-stepper { display: flex; align-items: center; gap: 3px; }
 .pomo-stepper .hv-label:nth-child(3) { min-width: 16px; text-align: center; color: var(--home-accent); }
 

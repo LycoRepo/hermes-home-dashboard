@@ -1,9 +1,14 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../../sdk";
-import type { AnalyticsResponse } from "../../api-types";
+import type { AnalyticsResponse, ModelsAnalyticsResponse } from "../../api-types";
 import { formatTokenCount } from "../format";
 import { HoverCtl } from "./HoverArrows";
 import { toBars, type Bar } from "./tokenSeries";
+import { groupMode, needsModels, groupBuckets, topBuckets, MAX_BUCKETS, type GroupMode } from "./usageView";
+
+/** model ↔ provider share one payload, so a re-read within this window is free. */
+const MODELS_CACHE_MS = 60_000;
+const GROUPS = ["day", "model", "provider"] as const;
 
 const RANGES = [
   { key: "week", label: "7 days", days: 7, byMonth: false },
@@ -23,10 +28,20 @@ interface Props {
   onWidgetPropsChange: (next: Record<string, unknown>) => void;
 }
 
+interface ModelsView {
+  days: number;
+  data: ModelsAnalyticsResponse | null;
+  /** True when the range's data is the last known good one, not a fresh read. */
+  stale: boolean;
+  failed: boolean;
+}
+
 /** Token usage with a hover range selector (7 days / 1 month / 6 months) plus a
  *  bars↔line chart toggle and a totals show/hide toggle. Each range fetches once
  *  on demand; hovering a point reveals an animated tooltip with that day's (or
- *  month's) tokens and cost. All choices persist in the widget's layout props. */
+ *  month's) tokens and cost. All choices persist in the widget's layout props.
+ *  The second control line groups the same range by model or by provider, which
+ *  reads the core models analytics (background/auxiliary usage included). */
 export function TokensWidget({ analytics, widgetProps, onWidgetPropsChange }: Props) {
   const rangeKey: RangeKey =
     RANGES.find((r) => r.key === widgetProps.range)?.key ?? "week";
@@ -34,6 +49,7 @@ export function TokensWidget({ analytics, widgetProps, onWidgetPropsChange }: Pr
   const idx = RANGES.findIndex((r) => r.key === rangeKey);
   const chart: "bars" | "line" = widgetProps.chart === "bars" ? "bars" : "line";
   const statsOn = widgetProps.stats !== false; // totals visible unless turned off
+  const group: GroupMode = groupMode(widgetProps.group);
   const [gid] = useState(() => `tok-grad-${gradSeq++}`);
 
   const [fetched, setFetched] = useState<AnalyticsResponse | null>(null);
@@ -53,31 +69,78 @@ export function TokensWidget({ analytics, widgetProps, onWidgetPropsChange }: Pr
     return () => { cancelled = true; };
   }, [range.days]);
 
+  // Grouped views (model / provider) fetch the models source on demand — in a
+  // separate effect so the day path above stays exactly as it was, and day mode
+  // never issues a models request.
+  const cacheRef = useRef(new Map<number, { data: ModelsAnalyticsResponse; at: number }>());
+  const [models, setModels] = useState<ModelsView | null>(null);
+
+  useEffect(() => {
+    if (!needsModels(group)) return;
+    let cancelled = false;
+    const cached = cacheRef.current.get(range.days);
+    if (cached && Date.now() - cached.at < MODELS_CACHE_MS) {
+      // model ↔ provider share one payload; day → model within a minute too.
+      setModels({ days: range.days, data: cached.data, stale: false, failed: false });
+      return;
+    }
+    api.getModelsAnalytics(range.days)
+      .then((r) => {
+        if (cancelled) return;
+        cacheRef.current.set(range.days, { data: r, at: Date.now() });
+        setModels({ days: range.days, data: r, stale: false, failed: false });
+      })
+      .catch(() => {
+        if (cancelled) return;
+        // A failed refresh keeps the last payload we saw (marked stale).
+        setModels((prev) => {
+          const data = (prev && prev.days === range.days ? prev.data : null)
+            ?? cacheRef.current.get(range.days)?.data ?? null;
+          return { days: range.days, data, stale: data !== null, failed: true };
+        });
+      });
+    return () => { cancelled = true; };
+  }, [group, range.days]);
+
   const setProp = (patch: Record<string, unknown>) =>
     onWidgetPropsChange({ ...widgetProps, ...patch });
   const cycle = (dir: 1 | -1) =>
     setProp({ range: RANGES[(idx + dir + RANGES.length) % RANGES.length].key });
 
   const controls = (
-    <HoverCtl className="tok-ctl">
-      <button className="hv-arrow" aria-label="previous" onClick={() => cycle(-1)}>‹</button>
-      <span className="hv-label">{range.label}</span>
-      <button className="hv-arrow" aria-label="next" onClick={() => cycle(1)}>›</button>
-      <span className="tok-div" />
-      <button
-        className={`hv-opt${chart === "line" ? " on" : ""}`}
-        onClick={() => setProp({ chart: chart === "line" ? "bars" : "line" })}
-        title="line / bars view"
-      >
-        line
-      </button>
-      <button
-        className={`hv-opt${statsOn ? " on" : ""}`}
-        onClick={() => setProp({ stats: !statsOn })}
-        title="show / hide totals"
-      >
-        totals
-      </button>
+    <HoverCtl className="tok-ctl tok-set">
+      <div className="tok-line">
+        <button className="hv-arrow" aria-label="previous" onClick={() => cycle(-1)}>‹</button>
+        <span className="hv-label">{range.label}</span>
+        <button className="hv-arrow" aria-label="next" onClick={() => cycle(1)}>›</button>
+        <span className="tok-div" />
+        <button
+          className={`hv-opt${chart === "line" ? " on" : ""}`}
+          onClick={() => setProp({ chart: chart === "line" ? "bars" : "line" })}
+          title="line / bars view"
+        >
+          line
+        </button>
+        <button
+          className={`hv-opt${statsOn ? " on" : ""}`}
+          onClick={() => setProp({ stats: !statsOn })}
+          title="show / hide totals"
+        >
+          totals
+        </button>
+      </div>
+      <div className="tok-grp">
+        {GROUPS.map((g) => (
+          <button
+            key={g}
+            className={`hv-opt${group === g ? " on" : ""}`}
+            onClick={() => setProp({ group: g })}
+            title={g === "day" ? "per-day chart" : `group this range by ${g}`}
+          >
+            {g}
+          </button>
+        ))}
+      </div>
     </HoverCtl>
   );
 
@@ -87,6 +150,55 @@ export function TokensWidget({ analytics, widgetProps, onWidgetPropsChange }: Pr
     () => toBars(view?.daily ?? [], range.byMonth),
     [view, range.byMonth],
   );
+
+  // Grouped view: the range's buckets (model / provider) as a token-descending
+  // list. No chart — a categorical series drawn as a line would mislead.
+  const grouped = group === "day" ? null : group;
+  if (grouped) {
+    const mv = models && models.days === range.days ? models : null;
+    const mdata = mv?.data ?? null;
+    const buckets = mdata ? groupBuckets(mdata.models, grouped) : [];
+    const { top, hidden } = topBuckets(buckets, MAX_BUCKETS);
+    return (
+      <div>
+        {controls}
+        {!mdata ? (
+          <span className="dim">{mv?.failed ? "unavailable" : "loading…"}</span>
+        ) : buckets.length === 0 ? (
+          <span className="dim">no usage in this range</span>
+        ) : (
+          <>
+            <span className="bigval">{formatTokenCount(top[0].tokens)}</span>
+            <span className="dim"> by {group} · {range.label}{mv?.stale ? " · stale" : ""}</span>
+            <span className="tok-note dim">含后台辅助</span>
+            <div className="rows">
+              {top.map((b) => (
+                <div className="row" key={b.key}>
+                  <span className="dim row-name" title={b.label}>{b.label}</span>
+                  <span className="dim num">{formatTokenCount(b.tokens)}</span>
+                  <span className="ok">${b.cost.toFixed(2)}</span>
+                </div>
+              ))}
+            </div>
+            {/* Sits outside `.rows` on purpose: `.rows` is a multi-column
+             *  container, and a span inside it both joins the column flow and
+             *  steals `:last-child` from the rows (killing the removed
+             *  border-bottom on the last visible row). */}
+            {hidden > 0 && (
+              <span className="dim tok-more">+{hidden} more</span>
+            )}
+            {statsOn && (
+              <div className="tok-stats">
+                <span><span className="dim">in</span> {formatTokenCount(mdata.totals.total_input)}</span>
+                <span><span className="dim">out</span> {formatTokenCount(mdata.totals.total_output)}</span>
+                <span><span className="dim">cost</span> <span className="ok">${mdata.totals.total_estimated_cost.toFixed(2)}</span></span>
+              </div>
+            )}
+          </>
+        )}
+      </div>
+    );
+  }
 
   if (!view) {
     return (

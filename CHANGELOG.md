@@ -20,6 +20,28 @@ clone, they never build).
 
 ---
 
+## 1.5.1 — 2026-10-07
+
+- **Tokens:** the hover control gains a second line — **day** (unchanged) /
+  **model** / **provider**. The grouped views list the range's top six buckets
+  by tokens with their estimated cost, taken from the core models analytics,
+  which folds in background/auxiliary usage (the widget says so: `含后台辅助`;
+  the buckets therefore add up to more than the day view's total). Note the
+  accounting: grouping attributes every API call to the model/provider active
+  **at call time**, while the day view (and the `sessions` table) attributes a
+  whole session to its **final** pair — so a session that switched models
+  mid-way lands in different buckets, and the two views differ in distribution
+  as well as in total. Both are correct; they are just different accounting.
+  The four billing-provider spellings of one endpoint (`alibaba-cn`, `alibaba`,
+  `bailian-others`, `dashscope-others`) merge into **Alibaba**; unset providers
+  show as **未标注**. The range, line↔bars and totals controls behave exactly
+  as before.
+- **Sessions:** a **recent / tokens** switch sorts the loaded list by token use
+  (largest first, stable for ties) and every row shows its token count. One poll
+  now loads 20 sessions instead of 9; paging is still 3 per page.
+- **Version:** `package-lock.json` had drifted to 1.3.0 — all four version
+  fields are now 1.5.1.
+
 ## 1.5.0 — 2026-09-27
 
 Polish pass, verified in a live Hermes Desktop.

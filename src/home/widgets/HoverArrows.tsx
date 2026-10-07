@@ -39,13 +39,16 @@ interface HoverArrowsProps {
   prevDisabled?: boolean;
   nextDisabled?: boolean;
   className?: string;
+  /** Extra content rendered after the arrows, in the same floating control
+   *  (e.g. a widget switch that must share the corner with the pager). */
+  children?: ReactNode;
 }
 
 /** The common `‹ label ›` hover control used by most widgets to step a range,
  *  page, or offset without entering edit mode. */
 export function HoverArrows({
   onPrev, onNext, label, onLabelClick,
-  prevDisabled, nextDisabled, className,
+  prevDisabled, nextDisabled, className, children,
 }: HoverArrowsProps) {
   return (
     <HoverCtl className={`hover-arrows${className ? ` ${className}` : ""}`}>
@@ -77,6 +80,7 @@ export function HoverArrows({
       >
         ›
       </button>
+      {children}
     </HoverCtl>
   );
 }
