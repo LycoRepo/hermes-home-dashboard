@@ -4,6 +4,7 @@
 import type {
   StatusResponse, SystemStats, AnalyticsResponse,
   PaginatedSessions, LogsResponse, CronJob, ModelsAnalyticsResponse,
+  TokenSeriesResponse,
 } from "./api-types";
 
 export interface HermesApi {
@@ -77,6 +78,23 @@ export const api: HermesApi = {
 
 export function fetchJSON<T = unknown>(url: string, init?: RequestInit): Promise<T> {
   return getHost().fetchJSON<T>(url, init);
+}
+
+const PLUGIN_API = "/api/plugins/home-dashboard";
+
+/** Per-day × model/provider series from the plugin's own read-only route.
+ *
+ *  It cannot live on `HermesApi`: that interface is the host's core-API slice
+ *  and the host will never expose a plugin route through it. `fetchJSON` is
+ *  the supported door (both the web dashboard and the Desktop host allow the
+ *  plugin prefix), so web and Desktop share this one code path. */
+export function getAnalyticsSeries(
+  days: number,
+  group: "model" | "provider",
+): Promise<TokenSeriesResponse> {
+  return fetchJSON<TokenSeriesResponse>(
+    `${PLUGIN_API}/analytics/series?days=${days}&group=${group}`,
+  );
 }
 
 /** Navigate to a core dashboard route. The SDK doesn't expose the host

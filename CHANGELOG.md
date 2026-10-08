@@ -20,6 +20,25 @@ clone, they never build).
 
 ---
 
+## 1.5.2 — 2026-10-08
+
+- **Tokens:** the **model** / **provider** views are charts now, not a text list.
+  **bars** draws one stacked column per day (one band per model/provider),
+  **line** draws one line per series, and both carry a **legend** — hovering an
+  entry highlights its series in the chart (the others fade back), and a
+  truncated name always has its full form in the tooltip. The colours are a
+  fixed blue ramp: seven lightness steps, neighbouring series always kept two
+  steps apart, and the misc bucket (`其他`, ranks 7+) in a neutral grey.
+- **Tokens:** the grouped views are on the **same ruler** as the day view. They
+  read a new read-only plugin route (`GET /analytics/series`), which counts the
+  primary usage only (`session_model_usage.task = ''`), so a day's stacked
+  columns add up to that day's bar; the big number and the `in` / `out` / `cost`
+  line come from the same `/analytics` totals. The per-bucket `$` and the
+  `含后台辅助` note of 1.5.1 are gone, and the range / chart / totals / grouping
+  controls are a single line that shrinks instead of wrapping.
+- **Version:** 1.5.2 (patch: one existing widget's presentation plus a
+  plugin-local read-only route).
+
 ## 1.5.1 — 2026-10-07
 
 - **Tokens:** the hover control gains a second line — **day** (unchanged) /

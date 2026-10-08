@@ -176,6 +176,29 @@ export interface ModelsAnalyticsResponse {
   period_days: number;
 }
 
+/** One (day, model/provider) aggregate of the plugin's own
+ *  `/analytics/series` route. Only the primary usage is counted
+ *  (`session_model_usage.task = ''`), so every row of one day adds up to that
+ *  day's bar in the day view — the two views are deliberately the same ruler.
+ *  `provider` is the raw `billing_provider` value (the widget merges the
+ *  spellings via `providerLabel`). */
+export interface TokenSeriesRow {
+  day: string;
+  model: string;
+  provider: string;
+  tokens: number;
+}
+
+export interface TokenSeriesResponse {
+  group: "model" | "provider";
+  period_days: number;
+  /** Every local calendar day the requested window touches, oldest first —
+   *  the chart axis. Usually `days + 1` entries, never padded to `days`. */
+  days: string[];
+  rows: TokenSeriesRow[];
+  totals: { total_tokens: number };
+}
+
 export interface LogsResponse {
   file: string;
   lines: string[];

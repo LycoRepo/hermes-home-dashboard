@@ -1,14 +1,22 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { api } from "../../sdk";
-import type { AnalyticsResponse, ModelsAnalyticsResponse } from "../../api-types";
+import { api, getAnalyticsSeries } from "../../sdk";
+import type { AnalyticsResponse, TokenSeriesResponse } from "../../api-types";
 import { formatTokenCount } from "../format";
 import { HoverCtl } from "./HoverArrows";
 import { toBars, type Bar } from "./tokenSeries";
-import { groupMode, needsModels, groupBuckets, topBuckets, MAX_BUCKETS, type GroupMode } from "./usageView";
+import {
+  assignColorSteps, foldTokenSeries, groupMode, lineCoords, linePathOf, MAX_BUCKETS,
+  needsModels, OTHER_COLOR, SERIES_COLORS, seriesSlots, slotLabel, stackColumnPct,
+  stackSegmentPcts, takeTopSeries, type GroupMode,
+} from "./usageView";
 
-/** model ↔ provider share one payload, so a re-read within this window is free. */
-const MODELS_CACHE_MS = 60_000;
+/** One payload serves a range and both groupings, so a re-read within this
+ *  window is free. */
+const SERIES_CACHE_MS = 60_000;
 const GROUPS = ["day", "model", "provider"] as const;
+
+// Line geometry lives in a 100×100 viewBox (stretched to fit, non-scaling stroke).
+const H = 100, W = 100, PAD = 3;
 
 const RANGES = [
   { key: "week", label: "7 days", days: 7, byMonth: false },
@@ -28,20 +36,26 @@ interface Props {
   onWidgetPropsChange: (next: Record<string, unknown>) => void;
 }
 
-interface ModelsView {
+interface SeriesView {
   days: number;
-  data: ModelsAnalyticsResponse | null;
+  data: TokenSeriesResponse | null;
   /** True when the range's data is the last known good one, not a fresh read. */
   stale: boolean;
   failed: boolean;
 }
 
-/** Token usage with a hover range selector (7 days / 1 month / 6 months) plus a
- *  bars↔line chart toggle and a totals show/hide toggle. Each range fetches once
- *  on demand; hovering a point reveals an animated tooltip with that day's (or
- *  month's) tokens and cost. All choices persist in the widget's layout props.
- *  The second control line groups the same range by model or by provider, which
- *  reads the core models analytics (background/auxiliary usage included). */
+/** Token usage with a hover range selector (7 days / 1 month / 6 months), a
+ *  bars↔line chart toggle and a totals show/hide toggle, all in one line.
+ *  Each range fetches once on demand; hovering a point reveals an animated
+ *  tooltip with that day's (or month's) tokens. The same line groups the range
+ *  by model or by provider, which draws stacked bars / one line per series
+ *  with a legend.
+ *
+ *  Both views share one ruler: the grouped series count only the primary usage
+ *  (the plugin route's `task = ''` filter), so the day's columns add up to that
+ *  day's bar in the day view, and the big number plus the in/out/cost line come
+ *  from the very same `/analytics` totals. No amounts anywhere inside the
+ *  grouped view itself. */
 export function TokensWidget({ analytics, widgetProps, onWidgetPropsChange }: Props) {
   const rangeKey: RangeKey =
     RANGES.find((r) => r.key === widgetProps.range)?.key ?? "week";
@@ -69,31 +83,36 @@ export function TokensWidget({ analytics, widgetProps, onWidgetPropsChange }: Pr
     return () => { cancelled = true; };
   }, [range.days]);
 
-  // Grouped views (model / provider) fetch the models source on demand — in a
-  // separate effect so the day path above stays exactly as it was, and day mode
-  // never issues a models request.
-  const cacheRef = useRef(new Map<number, { data: ModelsAnalyticsResponse; at: number }>());
-  const [models, setModels] = useState<ModelsView | null>(null);
+  // Grouped views (model / provider) fetch the plugin's series route on demand
+  // — in a separate effect so the day path above stays exactly as it was, and
+  // day mode never issues a series request.
+  const cacheRef = useRef(new Map<number, { data: TokenSeriesResponse; at: number }>());
+  const [series, setSeries] = useState<SeriesView | null>(null);
+  // Series hover: legend entries highlight their line/segment while the rest
+  // fade back. Reset on leave so a stale key never dims the next render.
+  const [hoverKey, setHoverKey] = useState<string | null>(null);
+  const [gtip, setGTip] = useState<{ label: string; tokens: number; frac: number } | null>(null);
 
   useEffect(() => {
     if (!needsModels(group)) return;
+    // The guard above narrows the runtime path; name the narrowed mode for TS.
+    const mode: "model" | "provider" = group === "provider" ? "provider" : "model";
     let cancelled = false;
     const cached = cacheRef.current.get(range.days);
-    if (cached && Date.now() - cached.at < MODELS_CACHE_MS) {
-      // model ↔ provider share one payload; day → model within a minute too.
-      setModels({ days: range.days, data: cached.data, stale: false, failed: false });
+    if (cached && Date.now() - cached.at < SERIES_CACHE_MS) {
+      setSeries({ days: range.days, data: cached.data, stale: false, failed: false });
       return;
     }
-    api.getModelsAnalytics(range.days)
+    getAnalyticsSeries(range.days, mode)
       .then((r) => {
         if (cancelled) return;
         cacheRef.current.set(range.days, { data: r, at: Date.now() });
-        setModels({ days: range.days, data: r, stale: false, failed: false });
+        setSeries({ days: range.days, data: r, stale: false, failed: false });
       })
       .catch(() => {
         if (cancelled) return;
         // A failed refresh keeps the last payload we saw (marked stale).
-        setModels((prev) => {
+        setSeries((prev) => {
           const data = (prev && prev.days === range.days ? prev.data : null)
             ?? cacheRef.current.get(range.days)?.data ?? null;
           return { days: range.days, data, stale: data !== null, failed: true };
@@ -128,8 +147,7 @@ export function TokensWidget({ analytics, widgetProps, onWidgetPropsChange }: Pr
         >
           totals
         </button>
-      </div>
-      <div className="tok-grp">
+        <span className="tok-div" />
         {GROUPS.map((g) => (
           <button
             key={g}
@@ -151,50 +169,144 @@ export function TokensWidget({ analytics, widgetProps, onWidgetPropsChange }: Pr
     [view, range.byMonth],
   );
 
-  // Grouped view: the range's buckets (model / provider) as a token-descending
-  // list. No chart — a categorical series drawn as a line would mislead.
+  // Grouped view: one series per model / provider across the range's day
+  // slots, drawn as stacked bars or as one line per series, with a legend.
   const grouped = group === "day" ? null : group;
   if (grouped) {
-    const mv = models && models.days === range.days ? models : null;
-    const mdata = mv?.data ?? null;
-    const buckets = mdata ? groupBuckets(mdata.models, grouped) : [];
-    const { top, hidden } = topBuckets(buckets, MAX_BUCKETS);
+    const sv = series && series.days === range.days ? series : null;
+    const data = sv?.data ?? null;
+    if (!data) {
+      return (
+        <div>
+          {controls}
+          <span className="dim">{sv?.failed ? "unavailable" : "loading…"}</span>
+        </div>
+      );
+    }
+    const points = takeTopSeries(
+      foldTokenSeries(data.rows, grouped, data.days, range.byMonth),
+      MAX_BUCKETS,
+    );
+    if (!points.length) {
+      return (
+        <div>
+          {controls}
+          <span className="dim">no usage in this range</span>
+        </div>
+      );
+    }
+    const slots = seriesSlots(data.days, range.byMonth);
+    const steps = assignColorSteps(points.length);
+    const colors = points.map((p, i) => (p.isOther ? OTHER_COLOR : SERIES_COLORS[steps[i]]));
+    const columnTotals = slots.map((_, i) =>
+      points.reduce((sum, p) => sum + (p.values[i] ?? 0), 0));
+    // Same ruler as the day view (peak = the biggest day's total), so a day
+    // with usage is exactly as tall in both views.
+    const peak = Math.max(1, ...columnTotals);
+    const dimmed = (key: string) => (hoverKey && hoverKey !== key ? 0.22 : 1);
+    const hover = (slot: string, i: number, tokens: number) => {
+      setGTip({ label: slotLabel(slot, range.byMonth), tokens, frac: (i + 0.5) / slots.length });
+      setShow(true);
+    };
+    const leave = () => { setGTip(null); setShow(false); };
+    // One source for the numbers, exactly as in the day view: the range's
+    // /analytics totals. The grouped breakdown never becomes a second ruler.
+    const t = view?.totals ?? null;
     return (
       <div>
         {controls}
-        {!mdata ? (
-          <span className="dim">{mv?.failed ? "unavailable" : "loading…"}</span>
-        ) : buckets.length === 0 ? (
-          <span className="dim">no usage in this range</span>
+        {t ? (
+          <span className="bigval">{formatTokenCount(t.total_input + t.total_output)}</span>
         ) : (
-          <>
-            <span className="bigval">{formatTokenCount(top[0].tokens)}</span>
-            <span className="dim"> by {group} · {range.label}{mv?.stale ? " · stale" : ""}</span>
-            <span className="tok-note dim">含后台辅助</span>
-            <div className="rows">
-              {top.map((b) => (
-                <div className="row" key={b.key}>
-                  <span className="dim row-name" title={b.label}>{b.label}</span>
-                  <span className="dim num">{formatTokenCount(b.tokens)}</span>
-                  <span className="ok">${b.cost.toFixed(2)}</span>
-                </div>
-              ))}
+          <span className="dim">loading…</span>
+        )}
+        <span className="dim"> by {group} · {range.label}{sv?.stale ? " · stale" : ""}</span>
+        <div className="home-spark-wrap" onMouseLeave={leave}>
+          {gtip && (
+            <div
+              className={`home-spark-tip${show ? " show" : ""}`}
+              style={{ left: `${gtip.frac * 100}%`, transform: `translateX(${-gtip.frac * 100}%)` }}
+            >
+              <b>{gtip.label}</b> · {formatTokenCount(gtip.tokens)}
             </div>
-            {/* Sits outside `.rows` on purpose: `.rows` is a multi-column
-             *  container, and a span inside it both joins the column flow and
-             *  steals `:last-child` from the rows (killing the removed
-             *  border-bottom on the last visible row). */}
-            {hidden > 0 && (
-              <span className="dim tok-more">+{hidden} more</span>
-            )}
-            {statsOn && (
-              <div className="tok-stats">
-                <span><span className="dim">in</span> {formatTokenCount(mdata.totals.total_input)}</span>
-                <span><span className="dim">out</span> {formatTokenCount(mdata.totals.total_output)}</span>
-                <span><span className="dim">cost</span> <span className="ok">${mdata.totals.total_estimated_cost.toFixed(2)}</span></span>
-              </div>
-            )}
-          </>
+          )}
+          {chart === "line" ? (
+            <svg className="home-area" viewBox="0 0 100 100" preserveAspectRatio="none">
+              {points.map((p, i) => (
+                <path
+                  key={p.key}
+                  d={linePathOf(lineCoords(p.values, peak, W, H, PAD))}
+                  fill="none"
+                  stroke={colors[i]}
+                  strokeWidth={1.5}
+                  strokeLinejoin="round"
+                  strokeLinecap="round"
+                  // "其他" is an aggregate, not a series: dashed marks it as such.
+                  strokeDasharray={p.isOther ? "4 3" : undefined}
+                  opacity={dimmed(p.key)}
+                  vectorEffect="non-scaling-stroke"
+                />
+              ))}
+              {slots.map((slot, i) => (
+                <rect
+                  key={slot}
+                  x={(i * W) / slots.length} y={0} width={W / slots.length} height={H} fill="transparent"
+                  onMouseEnter={() => hover(slot, i, columnTotals[i])}
+                  onMouseLeave={leave}
+                />
+              ))}
+            </svg>
+          ) : (
+            <div className="tok-stack">
+              {slots.map((slot, i) => {
+                const total = columnTotals[i];
+                const columnPct = stackColumnPct(total, peak);
+                const segs = stackSegmentPcts(
+                  points.map((p) => p.values[i] ?? 0), columnPct, total,
+                );
+                return (
+                  <div
+                    className="tok-col"
+                    key={slot}
+                    onMouseEnter={() => hover(slot, i, total)}
+                    onMouseLeave={leave}
+                  >
+                    {points.map((p, si) =>
+                      segs[si] > 0 ? (
+                        <i
+                          key={p.key}
+                          className="tok-seg"
+                          style={{ height: `${segs[si]}%`, background: colors[si], opacity: dimmed(p.key) }}
+                        />
+                      ) : null,
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+        {/* Legend: colour + name, full name on hover, and hovering an entry
+         *  highlights that series in the chart (the rest fades back). */}
+        <div className="tok-legend" onMouseLeave={() => setHoverKey(null)}>
+          {points.map((p, i) => (
+            <span
+              key={p.key}
+              className={`tok-legend-item${hoverKey && hoverKey !== p.key ? " dim" : ""}`}
+              title={p.label}
+              onMouseEnter={() => setHoverKey(p.key)}
+            >
+              <i className="tok-swatch" style={{ background: colors[i] }} />
+              <span className="tok-legend-name">{p.label}</span>
+            </span>
+          ))}
+        </div>
+        {statsOn && t && (
+          <div className="tok-stats">
+            <span><span className="dim">in</span> {formatTokenCount(t.total_input)}</span>
+            <span><span className="dim">out</span> {formatTokenCount(t.total_output)}</span>
+            <span><span className="dim">cost</span> <span className="ok">${t.total_estimated_cost.toFixed(2)}</span></span>
+          </div>
         )}
       </div>
     );
@@ -214,8 +326,7 @@ export function TokensWidget({ analytics, widgetProps, onWidgetPropsChange }: Pr
   const n = bars.length;
   const max = Math.max(1, ...bars.map((b) => b.tokens));
 
-  // Line/area geometry in a 100×100 viewBox (stretched to fit, non-scaling stroke).
-  const H = 100, W = 100, PAD = 3;
+  // Line/area geometry in the shared 100×100 viewBox.
   const coords: [number, number][] = bars.map((b, i) => [
     n <= 1 ? W / 2 : (i / (n - 1)) * W,
     H - PAD - (b.tokens / max) * (H - PAD * 2),

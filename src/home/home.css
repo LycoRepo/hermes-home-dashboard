@@ -478,6 +478,74 @@
 .tok-stats > span { white-space: nowrap; }
 .tok-stats .dim { margin-right: 2px; }
 
+/* Grouped Tokens charts (model / provider). Day view keeps .home-spark and
+ * .home-area untouched. */
+.tok-stack {
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: max(18px, 22cqh);
+  margin: 6px 0 4px;
+}
+/* One column per axis slot. `column-reverse` stacks the ranked series from the
+ * baseline up (first series at the bottom), and each segment's height is a % of
+ * the full band, so the segments of a column sum to its own height. */
+.tok-col {
+  flex: 1;
+  height: 100%;
+  min-width: 0;
+  display: flex;
+  flex-direction: column-reverse;
+  cursor: default;
+}
+.tok-seg {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  /* Hairline between two stacked segments: two flat ramp steps touching edge
+   * to edge read as one muddy block. Drawn in the widget's own surface dark,
+   * never as a third colour. The baseline segment has nothing below it. */
+  border-bottom: 1px solid rgb(6 8 14 / 0.75);
+  border-radius: 0;
+  transition: height 0.6s ease, opacity 0.15s ease;
+}
+.tok-col .tok-seg:first-child { border-bottom: none; }
+.tok-col .tok-seg:last-child { border-radius: 1px 1px 0 0; }
+
+/* Legend: swatch + name per series. The name truncates (models can be long)
+ * but the element's title always carries the full one; hovering an entry
+ * highlights its series in the chart and fades the others. */
+.tok-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1px 10px;
+  margin: 2px 0 0;
+  font-size: 9px;
+  line-height: 1.4;
+  color: var(--color-foreground, var(--ui-text-primary, #d8dce6));
+}
+.tok-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  max-width: 100%;
+  cursor: default;
+  transition: opacity 0.15s ease;
+}
+.tok-legend-item.dim { opacity: 0.35; }
+.tok-legend-name {
+  max-width: 104px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.tok-swatch {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 2px;
+}
+
 /* ── logs widget (per-file record list) ── */
 .logs-sub {
   display: flex;
@@ -697,19 +765,35 @@
 }
 /* Hover steppers for the pomodoro work/break lengths. */
 .hover-ctl.pomo-set { flex-direction: column; align-items: flex-end; gap: 1px; }
-/* Tokens control: two stacked lines (range/chart/totals, then the grouping).
- * Same corner, so they share one floating control instead of overlapping. */
-.hover-ctl.tok-set { flex-direction: column; align-items: flex-end; gap: 1px; }
+/* Tokens control: ONE row — range stepper, chart/totals toggles, grouping.
+ * It used to be two stacked lines; it now spans the widget and packs to the
+ * right (the left edge is set explicitly because .home-widget clips at its
+ * padding edge), never wraps, and steps its font size down in two container
+ * tiers instead of breaking into a second line. */
+.hover-ctl.tok-set {
+  left: 6px;
+  right: 6px;
+  flex-direction: row;
+  flex-wrap: nowrap;
+  justify-content: flex-end;
+  gap: 3px;
+}
+/* Natural width on purpose (no min-width:0): at the narrowest widget sizes the
+ * row overflows the control instead of shrinking, so the trailing grouping
+ * buttons stay on screen rather than being squeezed out of the clip. */
 .tok-line { display: flex; align-items: center; gap: 4px; }
-.tok-grp { display: flex; align-items: center; gap: 4px; }
-/* Explains that the grouped buckets include background/auxiliary usage, so
- * they add up to more than the day view's total. Grouped views only. */
-.tok-note { display: block; font-size: 9px; letter-spacing: 0.06em; }
-/* "+N more" for buckets beyond the top six. Own block line after the rows
- * container (it must not join the column flow, and inside it the span would
- * steal the :last-child that clears the last row's border-bottom). Same voice
- * as .tok-note. */
-.tok-more { display: block; font-size: 9px; letter-spacing: 0.06em; }
+@container (max-width: 430px) {
+  .hover-ctl.tok-set { gap: 2px; }
+  .hover-ctl.tok-set .hv-label,
+  .hover-ctl.tok-set .hv-opt { font-size: 8px; }
+}
+@container (max-width: 330px) {
+  .hover-ctl.tok-set { gap: 1px; }
+  .hover-ctl.tok-set .hv-label,
+  .hover-ctl.tok-set .hv-opt { font-size: 7px; }
+  .hover-ctl.tok-set .hv-opt { padding: 0 2px; }
+  .hover-ctl.tok-set .hv-arrow { font-size: 11px; padding: 0 1px; }
+}
 .pomo-stepper { display: flex; align-items: center; gap: 3px; }
 .pomo-stepper .hv-label:nth-child(3) { min-width: 16px; text-align: center; color: var(--home-accent); }
 

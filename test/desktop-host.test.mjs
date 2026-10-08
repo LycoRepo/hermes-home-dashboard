@@ -22,6 +22,10 @@ test("Desktop host routes widget data, layout persistence, and navigation throug
   assert.deepEqual(await adapter.api.getSystemStats(), { source: "/system" });
   assert.deepEqual(await adapter.api.getAnalytics(7), { source: "/analytics?days=7" });
   assert.deepEqual(await adapter.api.getModelsAnalytics(7), { source: "/analytics/models?days=7" });
+  assert.deepEqual(
+  await adapter.fetchJSON("/api/plugins/home-dashboard/analytics/series?days=7&group=model"),
+  { source: "/analytics/series?days=7&group=model" },
+  );
   assert.deepEqual(await adapter.api.getCronJobs(), { source: "/cron" });
   assert.deepEqual(await adapter.api.getSessions(9, 3), { source: "/sessions?limit=9&offset=3" });
   assert.deepEqual(await adapter.api.getLogs({ file: "errors", lines: 20 }), { file: "errors", lines: [] });
